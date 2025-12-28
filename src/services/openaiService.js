@@ -80,11 +80,9 @@ class OpenAIService {
       const stats = fs.statSync(tempFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
 
-      console.log(`📁 File size: ${fileSizeInMB.toFixed(2)}MB`);
-
       // Use chunking for all files > 5MB to prevent OOM crashes
       if (fileSizeInMB > 5) {
-        console.log(`📦 Large file detected (${fileSizeInMB.toFixed(2)}MB), using chunking...`);
+        console.log(`📦 Large file (${fileSizeInMB.toFixed(2)}MB), using chunking`);
         return await this.transcribeWithChunking(tempFilePath, fileName, options);
       }
 
@@ -189,49 +187,19 @@ class OpenAIService {
         fs.mkdirSync(tempDir, { recursive: true });
       }
       
-      console.log(`📦 Splitting large file into chunks...`);
-      
-      // Emit chunking started event
-      if (sessionId && socketService && socketService.sendProgressUpdate) {
-        await socketService.sendProgressUpdate(options.userId || 'system', 'transcription_chunking_started', {
-          sessionId,
-          fileName,
-          messageKey: 'chunkingStarted'
-        });
-      }
-      
       // Split into chunks (simple approach)
       const chunks = await this.splitAudioSimple(filePath, tempDir);
-      console.log(`📦 Created ${chunks.length} chunks`);
+      console.log(`📦 Processing ${chunks.length} chunks`);
       
-      // Emit chunks created event
-      if (sessionId && socketService && socketService.sendProgressUpdate) {
-        await socketService.sendProgressUpdate(options.userId || 'system', 'transcription_chunks_created', {
-          sessionId,
-          totalChunks: chunks.length,
-          messageKey: 'chunksCreated'
-        });
-      }
+      // Chunks created - no socket event needed
       
       // Transcribe chunks sequentially with aggressive memory management
       const transcripts = [];
       for (let i = 0; i < chunks.length; i++) {
-        console.log(`🎵 Transcribing chunk ${i + 1}/${chunks.length}...`);
-        
-        // Log memory before chunk processing
+        // Memory management before chunk processing
         const memBefore = process.memoryUsage();
-        console.log(`💾 Memory before chunk ${i + 1}: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB`);
         
-        // Emit chunk progress event
-        if (sessionId && socketService && socketService.sendProgressUpdate) {
-          await socketService.sendProgressUpdate(options.userId || 'system', 'transcription_chunk_progress', {
-            sessionId,
-            currentChunk: i + 1,
-            totalChunks: chunks.length,
-            progress: Math.round(((i) / chunks.length) * 100),
-            messageKey: 'chunkProgress'
-          });
-        }
+        // Chunk progress - no socket event needed
         
         try {
           const chunkResult = await this.transcribeSingleChunk(chunks[i]);
@@ -245,19 +213,10 @@ class OpenAIService {
             global.gc();
           }
           
+          // Memory cleanup after chunk
           const memAfter = process.memoryUsage();
-          console.log(`💾 Memory after chunk ${i + 1}: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB`);
           
-          // Emit chunk completed event
-          if (sessionId && socketService && socketService.sendProgressUpdate) {
-            await socketService.sendProgressUpdate(options.userId || 'system', 'transcription_chunk_completed', {
-              sessionId,
-              chunkIndex: i + 1,
-              totalChunks: chunks.length,
-              progress: Math.round(((i + 1) / chunks.length) * 100),
-              messageKey: 'chunkCompleted'
-            });
-          }
+          // Chunk completed - no socket event needed
           
           // Emergency memory check
           if (memAfter.heapUsed > 200 * 1024 * 1024) { // 200MB threshold
@@ -391,8 +350,7 @@ class OpenAIService {
     const chunkDuration = Math.max(estimatedChunkDuration, 60); // Minimum 1 minute chunks
     const numChunks = Math.ceil(duration / chunkDuration);
     
-    console.log(`📊 File: ${fileSizeInMB.toFixed(1)}MB, ${Math.round(duration/60)} minutes`);
-    console.log(`📦 Creating ${numChunks} chunks of ~${Math.round(chunkDuration/60)} minutes each (target: ${targetChunkSizeMB}MB per chunk)`);
+    // File analysis: ${fileSizeInMB.toFixed(1)}MB, ${Math.round(duration/60)} minutes, ${numChunks} chunks
     
     const chunks = [];
     
@@ -424,7 +382,7 @@ class OpenAIService {
               sizeMB: chunkSizeMB
             });
             
-            console.log(`✅ Chunk ${i + 1}: ${chunkSizeMB.toFixed(1)}MB`);
+            // Chunk created silently
             resolve();
           } else {
             reject(new Error(`FFmpeg failed for chunk ${i + 1}`));
@@ -512,14 +470,10 @@ class OpenAIService {
     const TOKEN_LIMIT = 5000; // Very low threshold for testing chunked processing (was 20000)
     const CHARS_PER_TOKEN = 4; // Rough estimate
     
-    console.log(`📊 Transcript length: ${transcriptLength} chars, threshold: ${TOKEN_LIMIT * CHARS_PER_TOKEN} chars`);
-    
     if (transcriptLength > TOKEN_LIMIT * CHARS_PER_TOKEN) {
-      console.log(`📊 Large transcript detected (${transcriptLength} chars), using chunked processing...`);
+      console.log(`📊 Large transcript (${transcriptLength} chars), using chunked processing`);
       return await this.generateReportChunked(transcript, reportType, options);
     }
-    
-    console.log(`📊 Using direct processing for transcript (${transcriptLength} chars)`);
     return await this.generateReportDirect(transcript, reportType, options);
   }
 
@@ -656,17 +610,13 @@ class OpenAIService {
    */
   async generateReportChunked(transcript, reportType = 'advisor', options = {}) {
     try {
-      console.log(`📊 Processing large transcript (${transcript.length} chars) in chunks...`);
-      
       // Split transcript into manageable chunks
       const chunks = this.splitTranscriptIntoChunks(transcript);
-      console.log(`📦 Split into ${chunks.length} chunks`);
+      console.log(`📦 Processing ${chunks.length} chunks for report generation`);
       
       // Process each chunk to create summaries
       const chunkSummaries = [];
       for (let i = 0; i < chunks.length; i++) {
-        console.log(`🔄 Processing chunk ${i + 1}/${chunks.length}...`);
-        
         const summary = await this.summarizeChunk(chunks[i], reportType, options);
         chunkSummaries.push(summary);
         
@@ -677,7 +627,6 @@ class OpenAIService {
       }
       
       // Combine summaries into final report
-      console.log(`🔗 Combining ${chunkSummaries.length} chunk summaries...`);
       const finalReport = await this.combineChunkSummaries(chunkSummaries, reportType, options);
       
       return finalReport;
@@ -771,8 +720,7 @@ Respond in JSON format:
     try {
       return JSON.parse(rawContent);
     } catch (parseError) {
-      console.warn('Failed to parse chunk summary JSON, attempting to fix...');
-      console.log('Raw chunk response:', rawContent.substring(0, 200) + '...');
+      console.warn('JSON parsing failed, attempting cleanup...');
       
       // Try to extract JSON from markdown code blocks if present
       const jsonMatch = rawContent.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
@@ -780,7 +728,7 @@ Respond in JSON format:
         try {
           return JSON.parse(jsonMatch[1]);
         } catch (secondError) {
-          console.warn('Failed to parse extracted JSON from markdown');
+          // Markdown extraction failed, continue to cleanup
         }
       }
       
@@ -793,7 +741,7 @@ Respond in JSON format:
       try {
         return JSON.parse(cleaned);
       } catch (thirdError) {
-        console.warn('All chunk JSON parsing attempts failed, using fallback');
+        console.warn('JSON cleanup failed, using fallback extraction');
         
         // Extract key information using regex as fallback
         const extractArrayFromText = (text, pattern) => {
@@ -858,7 +806,7 @@ Respond in JSON format:
     try {
       parsedContent = JSON.parse(rawContent);
     } catch (parseError) {
-      console.warn('Failed to parse final report JSON, using raw content');
+      console.warn('Final report JSON parsing failed, using raw content');
       parsedContent = { content: rawContent, parse_error: true };
     }
 

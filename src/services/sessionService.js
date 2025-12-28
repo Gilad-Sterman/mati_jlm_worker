@@ -77,7 +77,7 @@ class SessionService {
 
       if (error) throw error;
 
-      console.log(`✅ Worker updated session ${sessionId}: ${JSON.stringify(Object.keys(updateFields))}`);
+      // Session updated silently
       return updatedSession;
 
     } catch (error) {

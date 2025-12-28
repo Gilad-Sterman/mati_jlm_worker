@@ -47,7 +47,7 @@ class HttpService {
         );
         
         if (response.status === 200) {
-          console.log(`✅ Worker successfully sent ${eventType} to web server`);
+          // Progress update sent successfully
           return true;
         } else {
           throw new Error(`Unexpected response status: ${response.status}`);
@@ -126,7 +126,7 @@ class HttpService {
       });
       
       if (response.status === 200) {
-        console.log('✅ Worker successfully connected to web server');
+        // Connection validated successfully
         return true;
       } else {
         console.warn(`⚠️ Worker received unexpected status from web server: ${response.status}`);

@@ -33,7 +33,7 @@ class JobService {
         throw new Error(`Failed to create job: ${error.message}`);
       }
 
-      console.log(`✅ Worker created ${type} job for session ${session_id}:`, data.id);
+      // Job created silently
       return data;
 
     } catch (error) {

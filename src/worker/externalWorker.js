@@ -34,8 +34,6 @@ class ExternalWorker extends AIWorker {
    * Enhanced startup with connection validation
    */
   async start() {
-    console.log('🚀 Starting External AI Worker...');
-    
     // Validate environment variables
     this.validateEnvironment();
     
@@ -70,7 +68,7 @@ class ExternalWorker extends AIWorker {
       process.exit(1);
     }
     
-    console.log('✅ All required environment variables are set');
+    // Environment variables validated silently
   }
 
   /**
@@ -89,24 +87,19 @@ class ExternalWorker extends AIWorker {
    */
   async startupRecovery() {
     try {
-      console.log('🔄 Checking for stuck jobs from previous worker sessions...');
-      
       const { default: JobService } = await import('../services/jobService.js');
       const stuckJobs = await JobService.getStuckJobs();
       
       if (stuckJobs.length > 0) {
-        console.log(`🔧 Found ${stuckJobs.length} stuck jobs, resetting to pending status...`);
+        console.log(`🔧 Resetting ${stuckJobs.length} stuck jobs...`);
         
         for (const job of stuckJobs) {
           try {
             await JobService.resetJobStatus(job.id);
-            console.log(`✅ Reset stuck job: ${job.id} (${job.type})`);
           } catch (error) {
             console.error(`❌ Failed to reset job ${job.id}:`, error.message);
           }
         }
-      } else {
-        console.log('✅ No stuck jobs found');
       }
     } catch (error) {
       console.warn('⚠️ Startup recovery failed:', error.message);

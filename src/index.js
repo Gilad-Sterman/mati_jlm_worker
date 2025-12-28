@@ -6,13 +6,10 @@ import { testConnection } from './config/database.js';
  */
 async function startWorker() {
   console.log('🚀 Mati AI Worker Service Starting...');
-  console.log(`📅 Started at: ${new Date().toISOString()}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`💾 Node.js Memory Limit: ${process.env.NODE_OPTIONS || 'default'}`);
   
   try {
     // Test database connection first
-    console.log('🔗 Testing database connection...');
     const dbConnected = await testConnection();
     if (!dbConnected) {
       console.error('❌ Database connection failed. Exiting...');
@@ -23,7 +20,7 @@ async function startWorker() {
     const worker = new ExternalWorker();
     await worker.start();
     
-    console.log('✅ External AI Worker started successfully');
+    console.log('✅ External AI Worker ready');
     
     // Handle graceful shutdown
     const gracefulShutdown = (signal) => {

@@ -29,8 +29,7 @@ class AIWorker {
       return;
     }
     
-    // Aggressive startup cleanup to handle cached data
-    console.log('🧹 Performing startup cleanup...');
+    // Startup cleanup
     await this.startupCleanup();
     
     // Check if OpenAI is configured
@@ -45,8 +44,6 @@ class AIWorker {
       console.error('❌ OpenAI connection failed:', connectionTest.error);
       return;
     }
-
-    console.log(`✅ OpenAI connection successful (${connectionTest.models} models available)`);
 
     this.isRunning = true;
     this.processJobs();
@@ -74,7 +71,7 @@ class AIWorker {
 
         if (job) {
           this.currentJob = job;
-          console.log(`📋 Processing job ${job.job_id} (${job.job_type})`);
+          console.log(`📋 Processing ${job.job_type} job`);
           
           await this.processJob(job);
           this.currentJob = null;
@@ -140,7 +137,7 @@ class AIWorker {
         completed_at: new Date()
       });
 
-      console.log(`✅ Job ${job_id} completed successfully`);
+      console.log(`✅ ${job_type} job completed`);
 
     } catch (error) {
       console.error(`❌ Job ${job_id} failed:`, error);
@@ -169,12 +166,7 @@ class AIWorker {
         }
       }, userId, 'admin');
 
-      // Emit progress to user
-      await this.sendProgressUpdate(userId, 'transcription_started', {
-        sessionId,
-        jobId,
-        message: 'Transcription started...'
-      });
+      // Note: Removed transcription_started progress update - using static processing display
 
       // Determine language (you can make this configurable)
       const transcriptionOptions = {};
@@ -182,16 +174,11 @@ class AIWorker {
       // If Hebrew content is expected, specify language
       // transcriptionOptions.language = 'he';
 
-      // Call OpenAI Whisper with progress support for chunked progress
+      // Call OpenAI Whisper (removed progress support for chunked progress)
       const transcriptionResult = await openaiService.transcribeAudio(
         file_url, 
         file_name, 
-        {
-          ...transcriptionOptions,
-          sessionId,
-          userId,
-          socketService: this // Pass this worker instance for progress updates
-        }
+        transcriptionOptions
       );
 
       console.log(`✅ Transcription completed for session ${sessionId}`);
@@ -224,15 +211,7 @@ class AIWorker {
         }
       });
 
-      // Emit completion to user
-      await this.sendProgressUpdate(userId, 'transcription_complete', {
-        sessionId,
-        jobId,
-        message: 'Transcription completed successfully!',
-        transcript: transcriptionResult.text,
-        language: transcriptionResult.language,
-        duration: transcriptionResult.duration
-      });
+      // Note: Removed transcription_complete progress update - using static processing display
 
       // Create report generation job
       await this.createReportGenerationJob(sessionId, transcriptionResult.text);
@@ -253,13 +232,7 @@ class AIWorker {
           }
         }, userId, 'advisor');
 
-        // Emit error to user
-        await this.sendProgressUpdate(userId, 'transcription_error', {
-          sessionId,
-          jobId,
-          message: 'Transcription failed',
-          error: error.message
-        });
+        // Note: Removed transcription_error progress update - using static processing display
 
       } catch (updateError) {
         console.error('Failed to update session after transcription error:', updateError);
@@ -307,12 +280,7 @@ class AIWorker {
         }
       }, userId, 'advisor');
 
-      // Emit progress to user
-      await this.sendProgressUpdate(userId, 'report_generation_started', {
-        sessionId,
-        jobId,
-        message: 'Generating advisor and client reports...'
-      });
+      // Note: Removed report_generation_started progress update - using static processing display
 
       // Generate both advisor and client reports with session context
       const actualDuration = session.transcription_metadata?.duration || session.duration;
@@ -403,25 +371,10 @@ class AIWorker {
         }
       });
 
-      // Emit completion to user
+      // Emit final completion to user for global notifications
       await this.sendProgressUpdate(userId, 'reports_generated', {
         sessionId,
-        jobId,
-        message: 'Both advisor and client reports generated successfully!',
-        reports: {
-          advisor: {
-            id: savedAdvisorReport.id,
-            content: advisorReport.content,
-            type: 'adviser',
-            status: 'draft'
-          },
-          client: {
-            id: savedClientReport.id,
-            content: clientReport.content,
-            type: 'client',
-            status: 'draft'
-          }
-        }
+        message: 'Both advisor and client reports generated successfully!'
       });
 
     } catch (error) {
@@ -440,10 +393,9 @@ class AIWorker {
           }
         }, userId, 'advisor');
 
-        // Emit error to user
-        await this.sendProgressUpdate(userId, 'report_generation_error', {
+        // Emit error to user for global notifications
+        await this.sendProgressUpdate(userId, 'processing_error', {
           sessionId,
-          jobId,
           message: 'Report generation failed',
           error: error.message
         });
@@ -470,14 +422,7 @@ class AIWorker {
       // Keep report in draft status during processing
       // Note: Skipping status update as 'review' may not be valid in current DB schema
 
-      // Emit progress to user
-      await this.sendProgressUpdate(userId, 'report_regeneration_started', {
-        sessionId,
-        jobId,
-        reportId: report_id,
-        originalReportId: original_report_id,
-        message: `Regenerating ${report_type} report with AI...`
-      });
+      // Note: Removed report_regeneration_started progress update - using static processing display
 
       // Generate new report with notes and session context
       const regeneratedReport = await openaiService.generateReport(transcript, report_type, {
@@ -514,20 +459,7 @@ class AIWorker {
         }
       });
 
-      // Emit completion to user
-      await this.sendProgressUpdate(userId, 'report_regeneration_complete', {
-        sessionId,
-        jobId,
-        reportId: report_id,
-        originalReportId: original_report_id,
-        message: `${report_type} report regenerated successfully!`,
-        report: {
-          id: report_id,
-          content: regeneratedReport.content, // Send original object for immediate use
-          type: report_type,
-          status: 'draft'
-        }
-      });
+      // Note: Removed report_regeneration_complete progress update - report regeneration handled via Redux
 
     } catch (error) {
       console.error(`❌ Report regeneration failed for session ${sessionId}, report ${report_id}:`, error);
@@ -539,15 +471,7 @@ class AIWorker {
         const session = await SessionService.getSessionById(sessionId, null, 'admin');
         const userId = session.adviser_id;
 
-        // Emit error to user
-        await this.sendProgressUpdate(userId, 'report_regeneration_error', {
-          sessionId,
-          jobId,
-          reportId: report_id,
-          originalReportId: original_report_id,
-          message: 'Report regeneration failed',
-          error: error.message
-        });
+        // Note: Removed report_regeneration_error progress update - report regeneration handled via Redux
 
       } catch (updateError) {
         console.error('Failed to update report after regeneration error:', updateError);

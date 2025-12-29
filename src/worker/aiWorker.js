@@ -253,7 +253,7 @@ class AIWorker {
         payload: {
           transcript: transcript
         },
-        priority: 8 // Lower priority than transcription
+        priority: 10 // Higher priority than transcription
       });
 
     } catch (error) {

@@ -1025,10 +1025,10 @@ Generate a client report based directly on the transcript content - this report 
 Extract the following information directly from the transcript:
 
 ### General Summary
-- general_summary: A comprehensive summary of the conversation and the client's business in general. This should provide an overview of what was discussed, the client's business context, and the main topics covered during the meeting.
+- general_summary: A comprehensive summary focusing primarily on the client and their business. This should clearly identify who the client is, what their business does, the business domain/industry, current business stage, and main challenges or opportunities discussed. Provide an overview of what was discussed during the meeting within this business context.
 
 ### Target Summary
-- target_summary: A concise summary of the key insights and action items without any quotes. This should be a brief, actionable overview that synthesizes the main takeaways and next steps in clear, direct language.
+- target_summary: A concise summary of the key insights and action items without any quotes. This should be a brief, actionable overview that synthesizes the main takeaways and next steps in clear, direct language. If the adviser provided specific recommendations about consulting hours, fields of expertise, or scope of work during the conversation, include a final sentence summarizing these recommendations (only if explicitly discussed in the transcript).
 
 ### Key Insights (3-5 insights)
 - key_insights: Array of 3-5 key insights from the meeting, where each insight must include:
@@ -1041,7 +1041,7 @@ Extract the following information directly from the transcript:
 
 ### Action Items
 - action_items: Array of concrete action items discussed in the meeting, where each action item must include:
-  - task: Description of the task to be completed
+  - task: Description of the task to be completed. If a deadline was mentioned in the transcript, include it in the task description (e.g., "Complete market research by next Friday" or "Submit documents within 2 weeks")
   - owner: Who is responsible - must be one of: "client", "adviser", or specify other entity name
   - deadline: When the task should be completed (extract from transcript or use null if not specified)
   - status: Current status - must be one of: "open", "in progress", "completed"

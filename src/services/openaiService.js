@@ -17,38 +17,69 @@ class OpenAIService {
   }
 
   /**
-   * Download file from URL to temporary location
+   * Download file from URL to temporary location with retry logic for Cloudinary transformations
    */
-  async downloadFile(fileUrl, fileName) {
-    try {
-      const response = await axios({
-        method: 'GET',
-        url: fileUrl,
-        responseType: 'stream'
-      });
+  async downloadFile(fileUrl, fileName, originalUrl = null) {
+    const maxRetries = 5;
+    const retryDelays = [90000, 60000, 90000, 90000, 90000]; // 1.5m, 1m, 1.5m, 1.5m, 1.5m = 7 min total
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`📥 Downloading file (attempt ${attempt + 1}/${maxRetries + 1}): ${fileUrl}`);
+        
+        const response = await axios({
+          method: 'GET',
+          url: fileUrl,
+          responseType: 'stream'
+        });
 
-      // Create temp directory if it doesn't exist
-      const tempDir = path.join(process.cwd(), 'temp');
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
+        // Create temp directory if it doesn't exist
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir, { recursive: true });
+        }
+
+        // Create unique filename
+        const tempFileName = `${Date.now()}_${fileName}`;
+        const tempFilePath = path.join(tempDir, tempFileName);
+
+        // Save file
+        const writer = fs.createWriteStream(tempFilePath);
+        response.data.pipe(writer);
+
+        return new Promise((resolve, reject) => {
+          writer.on('finish', () => {
+            console.log(`✅ File downloaded successfully: ${tempFilePath}`);
+            resolve(tempFilePath);
+          });
+          writer.on('error', reject);
+        });
+
+      } catch (error) {
+        console.error(`❌ Download attempt ${attempt + 1} failed:`, error.message);
+        
+        // Check if this is a 423 Locked error (Cloudinary still processing transformation)
+        if (error.response?.status === 423 && attempt < maxRetries) {
+          const delay = retryDelays[attempt];
+          console.log(`⏳ Cloudinary transformation still processing. Retrying in ${delay / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // If we've exhausted retries and have an original URL, try that as fallback
+        if (attempt === maxRetries && originalUrl && originalUrl !== fileUrl) {
+          console.log(`🔄 Falling back to original file URL: ${originalUrl}`);
+          try {
+            return await this.downloadFile(originalUrl, fileName, null); // No further retries for original URL
+          } catch (fallbackError) {
+            console.error(`❌ Fallback to original URL also failed:`, fallbackError.message);
+            throw new Error(`Failed to download file after retries and fallback: ${fallbackError.message}`);
+          }
+        }
+        
+        // If no more retries or no original URL, throw the error
+        throw new Error(`Failed to download file: ${error.message}`);
       }
-
-      // Create unique filename
-      const tempFileName = `${Date.now()}_${fileName}`;
-      const tempFilePath = path.join(tempDir, tempFileName);
-
-      // Save file
-      const writer = fs.createWriteStream(tempFilePath);
-      response.data.pipe(writer);
-
-      return new Promise((resolve, reject) => {
-        writer.on('finish', () => resolve(tempFilePath));
-        writer.on('error', reject);
-      });
-
-    } catch (error) {
-      console.error('Error downloading file:', error);
-      throw new Error(`Failed to download file: ${error.message}`);
     }
   }
 
@@ -68,13 +99,13 @@ class OpenAIService {
   /**
    * Transcribe audio file using OpenAI Whisper
    */
-  async transcribeAudio(fileUrl, fileName, options = {}) {
+  async transcribeAudio(fileUrl, fileName, options = {}, originalUrl = null) {
 
     let tempFilePath = null;
 
     try {
-      // Download file to temp location
-      tempFilePath = await this.downloadFile(fileUrl, fileName);
+      // Download file to temp location with retry fallback
+      tempFilePath = await this.downloadFile(fileUrl, fileName, originalUrl);
 
       // Check file size (Whisper has 25MB limit)
       const stats = fs.statSync(tempFilePath);
@@ -679,24 +710,48 @@ class OpenAIService {
    * Summarize a single chunk of transcript
    */
   async summarizeChunk(chunk, reportType, options = {}) {
-    const summaryPrompt = `Please analyze this portion of a business consultation meeting and extract key insights:
+    const summaryPrompt = `Analyze this transcript segment as a professional business consultant, focusing on strategic business intelligence and value demonstration:
 
 TRANSCRIPT SEGMENT:
 ${chunk}
 
-Please provide a concise summary focusing on:
-1. Key business topics discussed
-2. Important decisions or recommendations
-3. Client concerns or questions
-4. Advisor guidance provided
+CRITICAL ANALYSIS APPROACH:
+- PRIORITIZE the most business-critical content - focus on the 20% that delivers 80% of the value
+- SYNTHESIZE insights strategically, don't just extract surface information
+- CAPTURE advisor expertise, tips, and professional guidance with supporting evidence
+- IDENTIFY client pain points and challenges that require strategic attention
+- DEMONSTRATE consultation value and MATI service opportunities
+- ANALYZE actual conversation language for proper language matching
+
+For CLIENT REPORTS, extract strategic business insights with supporting evidence:
+1. Client business challenges, pain points, operational issues (2-3 distinct items with quotes when present)
+2. Strategic advice, recommendations, professional guidance from advisor (2-3 distinct items with quotes when present)
+3. Business opportunities, growth potential, risks, strategic concerns (2-3 distinct items with quotes when present)
+4. Consultation value and MATI service recommendations when discussed (with supporting context)
+
+For ADVISOR REPORTS, focus on performance evaluation with evidence:
+1. Key business topics and conversation analysis with supporting quotes
+2. Advisor performance indicators and client interaction quality with examples
+3. Areas of strength and improvement opportunities with specific evidence
+
+EVIDENCE REQUIREMENTS:
+- Include compelling supporting quotes for each insight when available
+- Select quotes that best demonstrate the strategic value and context
+- Capture advisor tips, recommendations, and professional guidance verbatim when possible
+
+LANGUAGE ANALYSIS:
+- Analyze the actual conversation content to determine language (Hebrew/English)
+- Generate insights in the same language as the conversation content
+- Ignore session metadata language, focus on actual dialogue language
 
 Respond in JSON format:
 {
+  "client_business_insights": [{"insight": "strategic analysis", "quotes": ["supporting quote1", "quote2"]}],
+  "advisor_recommendations": [{"insight": "strategic recommendation", "quotes": ["supporting quote1", "quote2"]}], 
+  "opportunities_concerns": [{"insight": "strategic opportunity/concern", "quotes": ["supporting quote1", "quote2"]}],
+  "consultation_value": [{"insight": "value demonstration", "quotes": ["supporting quote1", "quote2"]}],
   "key_topics": ["topic1", "topic2"],
-  "decisions": ["decision1", "decision2"],
-  "client_concerns": ["concern1", "concern2"],
-  "advisor_guidance": ["guidance1", "guidance2"],
-  "summary": "Brief overall summary"
+  "summary": "Strategic business summary focusing on key value delivered"
 }`;
 
     const response = await this.openai.chat.completions.create({
@@ -704,15 +759,15 @@ Respond in JSON format:
       messages: [
         {
           role: 'system',
-          content: 'You are an expert business consultant analyzer. Provide structured summaries in JSON format.'
+          content: 'You are a professional business consultant analyzer specializing in strategic business analysis. Generate multiple insights per category when content supports it. Focus on business value and strategic recommendations.'
         },
         {
           role: 'user',
           content: summaryPrompt
         }
       ],
-      max_tokens: 800,
-      temperature: 0.3
+      max_tokens: 1200,
+      temperature: 0.7
     });
 
     const rawContent = response.choices[0].message.content;
@@ -749,12 +804,14 @@ Respond in JSON format:
           return matches ? matches.slice(1).filter(Boolean) : [];
         };
         
+        // Fallback extraction for basic insights (without quotes structure)
         return {
           summary: rawContent.replace(/[{}"\[\]]/g, '').substring(0, 200),
-          key_topics: extractArrayFromText(rawContent, /"key_topics":\s*\[(.*?)\]/s),
-          decisions: extractArrayFromText(rawContent, /"decisions":\s*\[(.*?)\]/s),
-          client_concerns: extractArrayFromText(rawContent, /"client_concerns":\s*\[(.*?)\]/s),
-          advisor_guidance: extractArrayFromText(rawContent, /"advisor_guidance":\s*\[(.*?)\]/s)
+          client_business_insights: extractArrayFromText(rawContent, /"client_business_insights":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+          advisor_recommendations: extractArrayFromText(rawContent, /"advisor_recommendations":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+          opportunities_concerns: extractArrayFromText(rawContent, /"opportunities_concerns":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+          consultation_value: extractArrayFromText(rawContent, /"consultation_value":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+          key_topics: extractArrayFromText(rawContent, /"key_topics":\s*\[(.*?)\]/s)
         };
       }
     }
@@ -764,20 +821,71 @@ Respond in JSON format:
    * Combine chunk summaries into final report
    */
   async combineChunkSummaries(summaries, reportType, options = {}) {
-    // Aggregate all insights from chunks
+    // Aggregate all insights from chunks with enhanced structure
     const aggregated = {
+      client_business_insights: [],
+      advisor_recommendations: [],
+      opportunities_concerns: [],
+      consultation_value: [],
       key_topics: [],
-      decisions: [],
-      client_concerns: [],
-      advisor_guidance: [],
       summaries: []
     };
 
     summaries.forEach(summary => {
+      // Handle both old format (strings) and new format (objects with quotes)
+      if (summary.client_business_insights) {
+        summary.client_business_insights.forEach(item => {
+          if (typeof item === 'string') {
+            aggregated.client_business_insights.push(item);
+          } else if (item.insight) {
+            aggregated.client_business_insights.push(item.insight);
+            if (item.quotes && item.quotes.length > 0) {
+              aggregated.client_business_insights.push(...item.quotes.map(q => `Supporting quote: "${q}"`));
+            }
+          }
+        });
+      }
+      
+      if (summary.advisor_recommendations) {
+        summary.advisor_recommendations.forEach(item => {
+          if (typeof item === 'string') {
+            aggregated.advisor_recommendations.push(item);
+          } else if (item.insight) {
+            aggregated.advisor_recommendations.push(item.insight);
+            if (item.quotes && item.quotes.length > 0) {
+              aggregated.advisor_recommendations.push(...item.quotes.map(q => `Supporting quote: "${q}"`));
+            }
+          }
+        });
+      }
+      
+      if (summary.opportunities_concerns) {
+        summary.opportunities_concerns.forEach(item => {
+          if (typeof item === 'string') {
+            aggregated.opportunities_concerns.push(item);
+          } else if (item.insight) {
+            aggregated.opportunities_concerns.push(item.insight);
+            if (item.quotes && item.quotes.length > 0) {
+              aggregated.opportunities_concerns.push(...item.quotes.map(q => `Supporting quote: "${q}"`));
+            }
+          }
+        });
+      }
+      
+      if (summary.consultation_value) {
+        summary.consultation_value.forEach(item => {
+          if (typeof item === 'string') {
+            aggregated.consultation_value.push(item);
+          } else if (item.insight) {
+            aggregated.consultation_value.push(item.insight);
+            if (item.quotes && item.quotes.length > 0) {
+              aggregated.consultation_value.push(...item.quotes.map(q => `Supporting quote: "${q}"`));
+            }
+          }
+        });
+      }
+      
       if (summary.key_topics) aggregated.key_topics.push(...summary.key_topics);
-      if (summary.decisions) aggregated.decisions.push(...summary.decisions);
-      if (summary.client_concerns) aggregated.client_concerns.push(...summary.client_concerns);
-      if (summary.advisor_guidance) aggregated.advisor_guidance.push(...summary.advisor_guidance);
       if (summary.summary) aggregated.summaries.push(summary.summary);
     });
 
@@ -830,7 +938,7 @@ Respond in JSON format:
   buildReportPromptFromSummaries(aggregated, reportType, options = {}) {
     const { sessionContext, notes, language } = options;
     
-    let prompt = `Based on the following aggregated insights from a business consultation meeting, generate a comprehensive ${reportType} report.\n\n`;
+    let prompt = `Based on the following aggregated insights from a business consultation meeting, generate a comprehensive ${reportType} report that demonstrates MATI's professional expertise and value.\n\n`;
     
     if (sessionContext) {
       prompt += `SESSION CONTEXT:\n`;
@@ -840,22 +948,26 @@ Respond in JSON format:
       prompt += `Duration: ${sessionContext.duration ? Math.round(sessionContext.duration/60) : 'Unknown'} minutes\n\n`;
     }
 
-    prompt += `AGGREGATED INSIGHTS:\n\n`;
+    prompt += `AGGREGATED STRATEGIC INSIGHTS:\n\n`;
     
+    if (aggregated.client_business_insights.length > 0) {
+      prompt += `CLIENT BUSINESS CHALLENGES & INSIGHTS:\n${aggregated.client_business_insights.map(insight => `- ${insight}`).join('\n')}\n\n`;
+    }
+    
+    if (aggregated.advisor_recommendations.length > 0) {
+      prompt += `ADVISOR RECOMMENDATIONS & GUIDANCE:\n${aggregated.advisor_recommendations.map(rec => `- ${rec}`).join('\n')}\n\n`;
+    }
+    
+    if (aggregated.opportunities_concerns.length > 0) {
+      prompt += `OPPORTUNITIES, RISKS & STRATEGIC CONCERNS:\n${aggregated.opportunities_concerns.map(item => `- ${item}`).join('\n')}\n\n`;
+    }
+    
+    if (aggregated.consultation_value.length > 0) {
+      prompt += `CONSULTATION VALUE & SERVICE RECOMMENDATIONS:\n${aggregated.consultation_value.map(value => `- ${value}`).join('\n')}\n\n`;
+    }
+
     if (aggregated.key_topics.length > 0) {
       prompt += `KEY TOPICS DISCUSSED:\n${aggregated.key_topics.map(topic => `- ${topic}`).join('\n')}\n\n`;
-    }
-    
-    if (aggregated.decisions.length > 0) {
-      prompt += `DECISIONS MADE:\n${aggregated.decisions.map(decision => `- ${decision}`).join('\n')}\n\n`;
-    }
-    
-    if (aggregated.client_concerns.length > 0) {
-      prompt += `CLIENT CONCERNS:\n${aggregated.client_concerns.map(concern => `- ${concern}`).join('\n')}\n\n`;
-    }
-    
-    if (aggregated.advisor_guidance.length > 0) {
-      prompt += `ADVISOR GUIDANCE:\n${aggregated.advisor_guidance.map(guidance => `- ${guidance}`).join('\n')}\n\n`;
     }
 
     if (notes) {
@@ -866,7 +978,23 @@ Respond in JSON format:
       prompt += `IMPORTANT: Generate the report in ${language} language to match the original meeting language.\n\n`;
     }
 
-    prompt += `Please generate a structured ${reportType} report based on these insights.`;
+    if (reportType === 'client') {
+      prompt += `CRITICAL INSTRUCTIONS FOR CLIENT REPORT:
+- Generate 5-9 key insights total, with multiple insights per category when the aggregated content supports it
+- Distribute insights strategically across the three categories:
+  * "what we learned about the clients business" - Use client business challenges and insights above
+  * "decisions made" - Use advisor recommendations and guidance above  
+  * "opportunities/risks or concerns that came up" - Use opportunities, risks, and strategic concerns above
+- Don't limit yourself to one insight per category - if you have multiple distinct business challenges, create separate insights for each
+- If you have multiple different advisor recommendations, create separate insights for each
+- Present insights as professional business analysis that demonstrates strategic value
+- Include consultation service recommendations when relevant
+- Support each insight with compelling evidence from the conversation
+
+IMPORTANT: Multiple insights per category are expected and encouraged when content supports it.`;
+    }
+
+    prompt += `\n\nPlease generate a structured ${reportType} report based on these strategic insights.`;
     
     return prompt;
   }
@@ -1019,43 +1147,59 @@ This section should contain 3 subsections, each with score (0-5), description, a
 CRITICAL: Generate all content values in the same language as the transcript, but use English field names in the JSON structure.`;
     } else if (reportType === 'client') {
       return basePrompt + `
-Generate a client report based directly on the transcript content - this report will be sent to the client so the tone should always be positive and helpful:
+Generate a comprehensive client report that demonstrates MATI's professional expertise and value - this report will be sent to the client:
 
 ## CLIENT REPORT STRUCTURE
-Extract the following information directly from the transcript:
+Analyze the conversation strategically to create a professional business consultation report:
 
 ### General Summary
-- general_summary: A comprehensive summary focusing primarily on the client and their business. This should clearly identify who the client is, what their business does, the business domain/industry, current business stage, and main challenges or opportunities discussed. Provide an overview of what was discussed during the meeting within this business context.
+- general_summary: Write a professional executive summary that positions the consultation as valuable business intelligence. Focus on the client's business situation, key challenges identified, strategic opportunities discussed, and the overall value delivered through the consultation. Present this as a strategic business assessment that demonstrates MATI's expertise and understanding of the client's needs.
 
-### Target Summary
-- target_summary: A concise summary of the key insights and action items without any quotes. This should be a brief, actionable overview that synthesizes the main takeaways and next steps in clear, direct language. If the adviser provided specific recommendations about consulting hours, fields of expertise, or scope of work during the conversation, include a final sentence summarizing these recommendations (only if explicitly discussed in the transcript).
+### Target Summary  
+- target_summary: Create a strategic recommendations section that synthesizes the most important business outcomes and next steps. Include specific advisor recommendations, consultation value propositions, and suggested MATI services when discussed. This should read like professional business consulting guidance that motivates continued engagement with MATI.
 
-### Key Insights (3-5 insights)
-- key_insights: Array of 3-5 key insights from the meeting, where each insight must include:
-  - category: Must be exactly one of these predetermined categories:
-    * "what we learned about the clients business"
-    * "decisions made"
-    * "opportunities/risks or concerns that came up"
-  - content: The actual insight content extracted from the transcript
-  - supporting_quotes: Array of direct quotes from the conversation that support this insight
+### Key Insights (5-9 insights total)
+- key_insights: Identify the most strategically important insights from the consultation. Generate multiple insights per category when the conversation content supports it. For longer consultations (30+ minutes), aim for 2-3 insights per category when relevant content exists.
+
+  Priority areas to analyze:
+  1. Critical client pain points and business challenges that require attention
+  2. Strategic advice, tips, and professional guidance provided by the advisor  
+  3. Business opportunities, growth potential, and strategic recommendations
+  
+  For each insight:
+  - category: Assign to the most appropriate category based on content:
+    * "what we learned about the clients business" - Client challenges, pain points, business situation analysis, industry insights, operational issues
+    * "decisions made" - Strategic advice, recommendations, guidance provided by advisor, solutions discussed, methodologies suggested
+    * "opportunities/risks or concerns that came up" - Growth opportunities, strategic concerns, future planning, market opportunities, potential risks
+  - content: Present as professional business analysis that demonstrates insight and expertise, not just conversation summary
+  - supporting_quotes: Include the most compelling evidence from the conversation that supports this strategic insight
+
+  IMPORTANT: Don't limit yourself to one insight per category. If the conversation contains multiple distinct business challenges, capture them as separate insights in "what we learned about the clients business". If the advisor provided several different recommendations, capture them as separate insights in "decisions made". Generate insights based on actual conversation content, not artificial distribution.
 
 ### Action Items
-- action_items: Array of concrete action items discussed in the meeting, where each action item must include:
-  - task: Description of the task to be completed. If a deadline was mentioned in the transcript, include it in the task description (e.g., "Complete market research by next Friday" or "Submit documents within 2 weeks")
-  - owner: Who is responsible - must be one of: "client", "adviser", or specify other entity name
-  - deadline: When the task should be completed (extract from transcript or use null if not specified)
-  - status: Current status - must be one of: "open", "in progress", "completed"
+- action_items: Capture both explicit tasks and strategic next steps that emerged from the consultation:
+  - task: Frame as strategic business actions with clear business context and rationale
+  - owner: Specify responsibility clearly - use "client", "adviser", or specific names when mentioned
+  - deadline: Extract specific timelines mentioned or use null if not specified
+  - status: Use "open" for new tasks, "in progress" for ongoing items, "completed" for finished tasks
 
-## EXTRACTION INSTRUCTIONS:
-- Extract information STRICTLY from the transcript - do not infer, speculate, or add information not explicitly present
-- Use actual quotes from the conversation to support insights
-- For action items, only include tasks that were explicitly discussed or agreed upon
-- If specific information is not available in the transcript, use null for that field
-- If no insights or action items are found, return empty arrays []
-- Maintain the original meaning and context of statements
-- Use clear, professional language suitable for client delivery
-- Categories must match exactly as specified above
-- Owner field should be specific - use actual names when mentioned or "client"/"adviser" as appropriate
+## STRATEGIC ANALYSIS INSTRUCTIONS:
+- PRIORITIZE the most business-critical content - focus on the 20% of conversation that delivers 80% of the value
+- CAPTURE advisor expertise - include tips, recommendations, and professional guidance provided
+- IDENTIFY client pain points - highlight challenges and concerns that require attention  
+- DEMONSTRATE value - show how the consultation provided strategic business intelligence
+- INCLUDE consultation recommendations - mention MATI services when discussed or naturally implied by business needs
+- SYNTHESIZE insights - don't just extract, but analyze and present strategically
+- MAINTAIN professional tone - write as a business consultant would document strategic insights
+- SUPPORT with evidence - use quotes that best demonstrate the insight, not just any quotes
+- FOCUS on impact - prioritize insights and actions that have the greatest business significance
+
+## CONTENT PRIORITIZATION:
+1. Client's most critical business challenges and pain points
+2. Strategic advice and professional recommendations from advisor
+3. Business opportunities and growth potential identified
+4. Consultation value and MATI service recommendations
+5. Concrete next steps and strategic actions
 
 CRITICAL LANGUAGE REQUIREMENT FOR CLIENT REPORT:
 - ANALYZE the actual conversation content in the transcript to determine language
@@ -1075,12 +1219,12 @@ Generate all content in the same language as the transcript, but use English fie
    * Get system prompt based on report type
    */
   getSystemPrompt(reportType) {
-    const baseSystem = "You are an AI assistant specialized in analyzing business conversations and generating professional reports. You can handle various types of audio content including meetings, consultations, presentations, and monologues. Always use the actual session information provided (client names, adviser names, dates, etc.) instead of generic placeholders like [Insert Name] or [Insert Date]. Be adaptive to the content type and provide valuable insights regardless of the conversation format. COMPANY CONTEXT: MATI JLM (מט״י ירושלים) stands for מרכז טיפוח יזמות (Center for Entrepreneurship Development) and is the organization that employs all the advisers conducting these business consultations. When referencing the organization, use the correct spelling: MATI JLM or מט״י ירושלים. CRITICAL LANGUAGE RULE: Analyze the actual conversation language in the transcript content (ignore session metadata language). If the conversation is in Hebrew, generate ALL content values in Hebrew. If the conversation is in English, generate ALL content values in English. JSON field names must remain in English, but content values must match the conversation language exactly. IMPORTANT: You must respond with a valid JSON object only - no markdown, no additional text, just pure JSON.";
+    const baseSystem = "You are specialized in analyzing business conversations and generating professional reports. You can handle various types of audio content including meetings, consultations, presentations, and monologues. Always use the actual session information provided (client names, adviser names, dates, etc.) instead of generic placeholders like [Insert Name] or [Insert Date]. Be adaptive to the content type and provide valuable insights regardless of the conversation format. COMPANY CONTEXT: MATI JLM (מט״י ירושלים) stands for מרכז טיפוח יזמות (Center for Entrepreneurship Development) and is the organization that employs all the advisers conducting these business consultations. When referencing the organization, use the correct spelling: MATI JLM or מט״י ירושלים. CRITICAL LANGUAGE RULE: Analyze the actual conversation language in the transcript content (ignore session metadata language). If the conversation is in Hebrew, generate ALL content values in Hebrew. If the conversation is in English, generate ALL content values in English. JSON field names must remain in English, but content values must match the conversation language exactly. IMPORTANT: You must respond with a valid JSON object only - no markdown, no additional text, just pure JSON.";
 
     if (reportType === 'adviser' || reportType === 'advisor') {
       return baseSystem + " Generate advisor reports with conversation analysis and performance evaluation. Include specific client details and personalize the report with actual names and information provided. The report should contain 5 main sections with comprehensive analysis. Return the response as a JSON object with the following structure: {\"topics\": [{\"topic\": \"string\", \"sub_topics\": [\"array of strings\"], \"time_percentage\": \"number\"}], \"topics_covered\": {\"introducing_advisor_percentage\": \"number\", \"introducing_mati_percentage\": \"number\", \"opening_percentage\": \"number\", \"collecting_info_percentage\": \"number\", \"actual_content_percentage\": \"number\"}, \"client_readiness_score\": \"number (0-100)\", \"listening\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"clarity\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"continuation\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"things_to_preserve\": [{\"title\": \"string\", \"description\": \"string\"}], \"needs_improvement\": [{\"title\": \"string\", \"description\": \"string\"}]}";
     } else if (reportType === 'client') {
-      return baseSystem + " Generate client reports by extracting information directly from the transcript. Include specific client details and personalize the report with actual names and information provided. Focus STRICTLY on concrete information present in the conversation - do not infer or speculate. Return the response as a JSON object with the following structure: {\"general_summary\": \"string (comprehensive summary of conversation and client's business)\", \"target_summary\": \"string (concise summary of key insights and actions without quotes)\", \"key_insights\": [{\"category\": \"string (must be exactly one of: 'what we learned about the clients business', 'decisions made', 'opportunities/risks or concerns that came up')\", \"content\": \"string\", \"supporting_quotes\": [\"array of direct quotes\"]}], \"action_items\": [{\"task\": \"string\", \"owner\": \"string (client/adviser/other entity name)\", \"deadline\": \"string or null\", \"status\": \"string (open/in progress/completed)\"}]}";
+      return baseSystem + " You are a professional business consultant generating comprehensive client reports for MATI JLM's entrepreneurship development services. Create professional, strategic reports that demonstrate expertise and value. PROFESSIONAL TONE: Write in formal business language appropriate to the conversation language. Present insights as strategic business analysis, not conversation summaries. Focus on business implications and actionable outcomes. ANALYSIS APPROACH: Prioritize the most significant business insights and strategic recommendations. Identify client pain points, challenges, and growth opportunities. Capture advisor expertise, tips, and professional guidance provided. Synthesize information to show business value and next steps. CONTENT PRIORITIES: 1) Client's key business challenges and pain points, 2) Strategic advice and recommendations provided by advisor, 3) Business opportunities and growth potential identified, 4) Professional consultation value and MATI service recommendations. EVIDENCE-BASED: Support all insights with specific conversation evidence, but present analysis professionally rather than as raw extraction. Include consultation package recommendations when discussed or implied by business needs. Return the response as a JSON object with the following structure: {\"general_summary\": \"string (professional executive summary of client's business situation and consultation outcomes)\", \"target_summary\": \"string (strategic recommendations and next steps, including consultation services when relevant)\", \"key_insights\": [{\"category\": \"string (must be exactly one of: 'what we learned about the clients business', 'decisions made', 'opportunities/risks or concerns that came up')\", \"content\": \"string (professional business analysis)\", \"supporting_quotes\": [\"array of key evidence from conversation\"]}], \"action_items\": [{\"task\": \"string (strategic action with business context)\", \"owner\": \"string (client/adviser/other entity name)\", \"deadline\": \"string or null\", \"status\": \"string (open/in progress/completed)\"}]}";
     }
 
     return baseSystem;

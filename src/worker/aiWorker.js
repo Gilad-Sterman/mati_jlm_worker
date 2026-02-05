@@ -2,12 +2,14 @@ import JobService from '../services/jobService.js';
 import SessionService from '../services/sessionService.js';
 import openaiService from '../services/openaiService.js';
 import ReportService from '../services/reportService.js';
+import PrivacyFilterService from '../services/privacyFilterService.js';
 
 class AIWorker {
   constructor() {
     this.isRunning = false;
     this.pollInterval = 5000; // Check for jobs every 5 seconds
     this.currentJob = null;
+    this.privacyFilter = new PrivacyFilterService();
   }
 
   /**
@@ -151,7 +153,7 @@ class AIWorker {
    * Process transcription job
    */
   async processTranscriptionJob(jobId, sessionId, payload) {
-    const { file_url, file_name, file_type } = payload;
+    const { file_url, original_url, file_name, file_type } = payload;
 
     try {
       // Get session info to find the user
@@ -174,47 +176,64 @@ class AIWorker {
       // If Hebrew content is expected, specify language
       // transcriptionOptions.language = 'he';
 
-      // Call OpenAI Whisper (removed progress support for chunked progress)
+      // Call OpenAI Whisper with original URL as fallback for retry logic
       const transcriptionResult = await openaiService.transcribeAudio(
         file_url, 
         file_name, 
-        transcriptionOptions
+        transcriptionOptions,
+        original_url // Pass original URL for 423 retry fallback
       );
 
       console.log(`✅ Transcription completed for session ${sessionId}`);
 
-      // Update session with transcript and status
+      // Apply privacy filtering to transcription
+      const { filteredText, auditData } = await this.privacyFilter.filterTranscription(
+        transcriptionResult.text,
+        transcriptionResult.language,
+        sessionId
+      );
+
+      console.log(`🔒 Privacy filtering completed: ${auditData.totalFiltered} items filtered`);
+
+      // Save audit data to database
+      await this.privacyFilter.saveAuditData(auditData);
+
+      // Update session with filtered transcript and status
       await SessionService.updateSession(sessionId, {
         status: 'transcribed',
-        transcription_text: transcriptionResult.text,
+        transcription_text: filteredText,
         transcription_metadata: {
           language: transcriptionResult.language,
           duration: transcriptionResult.duration,
           model: transcriptionResult.metadata.model,
           processing_time_ms: transcriptionResult.metadata.processing_time_ms,
           transcribed_at: transcriptionResult.metadata.transcribed_at,
-          mock_mode: transcriptionResult.metadata.mock_mode || false
+          mock_mode: transcriptionResult.metadata.mock_mode || false,
+          privacy_filter: auditData
         },
         processing_metadata: {
           transcription_completed_at: new Date().toISOString(),
           transcription_duration_ms: transcriptionResult.metadata.processing_time_ms,
           language: transcriptionResult.language,
-          model: transcriptionResult.metadata.model
+          model: transcriptionResult.metadata.model,
+          privacy_filtered: auditData.totalFiltered > 0
         }
       }, userId, 'admin');
 
-      // Store result in job
+      // Store result in job (filtered text only)
       await JobService.updateJob(jobId, {
         result: {
-          transcript: transcriptionResult.text,
-          metadata: transcriptionResult.metadata
+          transcript: filteredText,
+          metadata: transcriptionResult.metadata,
+          privacy_filtered: auditData.totalFiltered > 0,
+          filtered_items_count: auditData.totalFiltered
         }
       });
 
       // Note: Removed transcription_complete progress update - using static processing display
 
-      // Create report generation job
-      await this.createReportGenerationJob(sessionId, transcriptionResult.text);
+      // Create report generation job (use filtered text for reports)
+      await this.createReportGenerationJob(sessionId, filteredText);
 
     } catch (error) {
       console.error(`❌ Transcription failed for session ${sessionId}:`, error);

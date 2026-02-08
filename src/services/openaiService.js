@@ -9,6 +9,10 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// OLD INSTRUCTIONS FOR GENERAL_SUMMARY (kept for rollback if needed):
+// - general_summary: Write a professional executive summary that positions the consultation as valuable business intelligence. Focus on the client's business situation, key challenges identified, strategic opportunities discussed, and the overall value delivered through the consultation. Present this as a strategic business assessment that demonstrates MATI's expertise and understanding of the client's needs.
+
+
 class OpenAIService {
   constructor() {
     this.openai = new OpenAI({
@@ -545,8 +549,9 @@ class OpenAIService {
           console.log('⚠️ Initial JSON parse failed, attempting to sanitize...');
           console.log('Error position:', error.message.match(/position (\d+)/)?.[1] || 'unknown');
           
-          // Step 1: Fix common Hebrew abbreviations with quotes
+          // Step 1: Fix common Hebrew abbreviations with quotes (both unescaped and partially-escaped)
           let sanitized = content
+            // Fix unescaped Hebrew abbreviations
             .replace(/תב"ע/g, 'תב\\"ע')
             .replace(/ח"כ/g, 'ח\\"כ')
             .replace(/מ"מ/g, 'מ\\"מ')
@@ -557,6 +562,19 @@ class OpenAIService {
             .replace(/ע"י/g, 'ע\\"י')
             .replace(/ב"כ/g, 'ב\\"כ')
             .replace(/נדל"ן/g, 'נדל\\"ן')
+            .replace(/ש"ח/g, 'ש\\"ח')
+            // Fix partially-escaped Hebrew abbreviations (the critical fix)
+            .replace(/תב\\"ע/g, 'תב\\\\"ע')
+            .replace(/ח\\"כ/g, 'ח\\\\"כ')
+            .replace(/מ\\"מ/g, 'מ\\\\"מ')
+            .replace(/ר\\"מ/g, 'ר\\\\"מ')
+            .replace(/מ\\"ד/g, 'מ\\\\"ד')
+            .replace(/ת\\"א/g, 'ת\\\\"א')
+            .replace(/י\\"ש/g, 'י\\\\"ש')
+            .replace(/ע\\"י/g, 'ע\\\\"י')
+            .replace(/ב\\"כ/g, 'ב\\\\"כ')
+            .replace(/נדל\\"ן/g, 'נדל\\\\"ן')
+            .replace(/ש\\"ח/g, 'ש\\\\"ח')
             .replace(/הדריכלות/g, 'האדריכלות'); // Fix typo that might cause issues
           
           try {
@@ -759,7 +777,7 @@ Respond in JSON format:
       messages: [
         {
           role: 'system',
-          content: 'You are a professional business consultant analyzer specializing in strategic business analysis. Generate multiple insights per category when content supports it. Focus on business value and strategic recommendations.'
+          content: 'You are a professional business consultant analyzer specializing in strategic business analysis. Generate multiple insights per category when content supports it. Focus on business value and strategic recommendations. CRITICAL JSON ESCAPING: When including Hebrew abbreviations with quotes (like ש"ח, ח"כ, מ"מ, ת"א), leave them unescaped in your JSON strings (ש"ח not ש\\"ח). Do not partially escape quotes as this breaks JSON parsing.'
         },
         {
           role: 'user',
@@ -980,6 +998,17 @@ Respond in JSON format:
 
     if (reportType === 'client') {
       prompt += `CRITICAL INSTRUCTIONS FOR CLIENT REPORT:
+
+GENERAL SUMMARY REQUIREMENTS:
+Create a comprehensive executive summary (aim for 150-250 words when aggregated content allows) that synthesizes the aggregated insights into a cohesive business intelligence overview. Include the following elements ONLY when the aggregated insights support them - do not fabricate information:
+- Client's business context and current situation
+- Primary challenges and pain points identified  
+- Strategic opportunities and growth potential discussed
+- Specific value delivered through MATI's consultation
+- Key business outcomes and strategic implications
+Use the aggregated insights to create a substantive, detailed summary that demonstrates professional consultation value.
+
+KEY INSIGHTS REQUIREMENTS:
 - Generate 5-9 key insights total, with multiple insights per category when the aggregated content supports it
 - Distribute insights strategically across the three categories:
   * "what we learned about the clients business" - Use client business challenges and insights above
@@ -1153,7 +1182,15 @@ Generate a comprehensive client report that demonstrates MATI's professional exp
 Analyze the conversation strategically to create a professional business consultation report:
 
 ### General Summary
-- general_summary: Write a professional executive summary that positions the consultation as valuable business intelligence. Focus on the client's business situation, key challenges identified, strategic opportunities discussed, and the overall value delivered through the consultation. Present this as a strategic business assessment that demonstrates MATI's expertise and understanding of the client's needs.
+- general_summary: Write a comprehensive professional executive summary (aim for 150-250 words when content allows) that positions the consultation as valuable business intelligence. Structure this summary to include the following elements ONLY when the actual conversation content supports them - do not fabricate information for short conversations or limited content:
+
+  1. CLIENT BUSINESS CONTEXT: Brief overview of the client's business, industry, and current situation based on the conversation
+  2. KEY CHALLENGES IDENTIFIED: Primary business challenges or pain points discovered during the consultation (when discussed)
+  3. STRATEGIC OPPORTUNITIES: Main growth opportunities, potential solutions, or strategic directions discussed (when relevant)
+  4. CONSULTATION VALUE: Specific value delivered through MATI's expertise, including advisor insights, recommendations, and guidance provided
+  5. BUSINESS OUTCOMES: Key takeaways and strategic implications for the client's business development (when applicable)
+
+Present this as a strategic business assessment that demonstrates MATI's deep understanding of the client's needs and showcases the professional value delivered. Use specific details from the conversation to make the summary substantive and relevant, avoiding generic language. For shorter conversations or limited content, focus on the elements that were actually discussed rather than trying to meet all requirements.
 
 ### Target Summary  
 - target_summary: Create a strategic recommendations section that synthesizes the most important business outcomes and next steps. Include specific advisor recommendations, consultation value propositions, and suggested MATI services when discussed. This should read like professional business consulting guidance that motivates continued engagement with MATI.
@@ -1219,7 +1256,7 @@ Generate all content in the same language as the transcript, but use English fie
    * Get system prompt based on report type
    */
   getSystemPrompt(reportType) {
-    const baseSystem = "You are specialized in analyzing business conversations and generating professional reports. You can handle various types of audio content including meetings, consultations, presentations, and monologues. Always use the actual session information provided (client names, adviser names, dates, etc.) instead of generic placeholders like [Insert Name] or [Insert Date]. Be adaptive to the content type and provide valuable insights regardless of the conversation format. COMPANY CONTEXT: MATI JLM (מט״י ירושלים) stands for מרכז טיפוח יזמות (Center for Entrepreneurship Development) and is the organization that employs all the advisers conducting these business consultations. When referencing the organization, use the correct spelling: MATI JLM or מט״י ירושלים. CRITICAL LANGUAGE RULE: Analyze the actual conversation language in the transcript content (ignore session metadata language). If the conversation is in Hebrew, generate ALL content values in Hebrew. If the conversation is in English, generate ALL content values in English. JSON field names must remain in English, but content values must match the conversation language exactly. IMPORTANT: You must respond with a valid JSON object only - no markdown, no additional text, just pure JSON.";
+    const baseSystem = "You are specialized in analyzing business conversations and generating professional reports. You can handle various types of audio content including meetings, consultations, presentations, and monologues. Always use the actual session information provided (client names, adviser names, dates, etc.) instead of generic placeholders like [Insert Name] or [Insert Date]. Be adaptive to the content type and provide valuable insights regardless of the conversation format. COMPANY CONTEXT: MATI JLM (מט״י ירושלים) stands for מרכז טיפוח יזמות (Center for Entrepreneurship Development) and is the organization that employs all the advisers conducting these business consultations. When referencing the organization, use the correct spelling: MATI JLM or מט״י ירושלים. CRITICAL LANGUAGE RULE: Analyze the actual conversation language in the transcript content (ignore session metadata language). If the conversation is in Hebrew, generate ALL content values in Hebrew. If the conversation is in English, generate ALL content values in English. JSON field names must remain in English, but content values must match the conversation language exactly. CRITICAL JSON ESCAPING: When including Hebrew abbreviations with quotes (like ש\"ח, ח\"כ, מ\"מ, ת\"א), leave them unescaped in your JSON strings (ש\"ח not ש\\\"ח). Do not partially escape quotes as this breaks JSON parsing. For any quotes within Hebrew text, either leave them unescaped or properly double-escape them. IMPORTANT: You must respond with a valid JSON object only - no markdown, no additional text, just pure JSON.";
 
     if (reportType === 'adviser' || reportType === 'advisor') {
       return baseSystem + " Generate advisor reports with conversation analysis and performance evaluation. Include specific client details and personalize the report with actual names and information provided. The report should contain 5 main sections with comprehensive analysis. Return the response as a JSON object with the following structure: {\"topics\": [{\"topic\": \"string\", \"sub_topics\": [\"array of strings\"], \"time_percentage\": \"number\"}], \"topics_covered\": {\"introducing_advisor_percentage\": \"number\", \"introducing_mati_percentage\": \"number\", \"opening_percentage\": \"number\", \"collecting_info_percentage\": \"number\", \"actual_content_percentage\": \"number\"}, \"client_readiness_score\": \"number (0-100)\", \"listening\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"clarity\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"continuation\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"things_to_preserve\": [{\"title\": \"string\", \"description\": \"string\"}], \"needs_improvement\": [{\"title\": \"string\", \"description\": \"string\"}]}";

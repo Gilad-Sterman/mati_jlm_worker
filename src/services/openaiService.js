@@ -18,6 +18,55 @@ class OpenAIService {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY
     });
+
+    // Supported languages for report generation and privacy filtering
+    this.SUPPORTED_LANGUAGES = ['he', 'en', 'ar'];
+
+    // Language mapping for normalization (ISO codes and full names)
+    this.LANGUAGE_MAP = {
+      'he': 'he', 'hebrew': 'he', 'iw': 'he',
+      'en': 'en', 'english': 'en',
+      'ar': 'ar', 'arabic': 'ar',
+      'el': 'el', 'greek': 'el', // Included for mapping but not in SUPPORTED_LANGUAGES
+    };
+  }
+
+  /**
+   * Normalize language code/name to standard ISO code
+   */
+  normalizeLanguage(lang) {
+    if (!lang) return null;
+    const normalized = lang.toLowerCase().trim();
+    return this.LANGUAGE_MAP[normalized] || normalized;
+  }
+
+  /**
+   * Generates strict language requirement instructions for GPT prompts
+   */
+  getLanguageRequirementInstructions(language) {
+    const normalizedLang = this.normalizeLanguage(language);
+    const isSupported = this.SUPPORTED_LANGUAGES.includes(normalizedLang);
+
+    let languageInstruction = '';
+    if (isSupported) {
+      languageInstruction = `DETECTED TRANSCRIPT LANGUAGE: ${normalizedLang.toUpperCase()}`;
+    } else if (normalizedLang) {
+      languageInstruction = `WARNING: The automatically detected language tag (${normalizedLang.toUpperCase()}) is NOT supported or potentially incorrect. 
+      PLEASE ANALYZE the transcript text below carefully to determine if it is Hebrew, English, or Arabic, and generate the content in that language. 
+      If uncertain, default to Hebrew.`;
+    } else {
+      languageInstruction = 'ANALYZE the transcript language carefully - look at the actual conversation content (Hebrew, English, or Arabic), not the session metadata';
+    }
+
+    return `
+CRITICAL LANGUAGE REQUIREMENT: 
+- ${languageInstruction}
+- If the transcript conversation is in Hebrew, generate ALL content in Hebrew
+- If the transcript conversation is in English, generate ALL content in English
+- If the transcript conversation is in Arabic, generate ALL content in Arabic
+- IGNORE the language of session metadata (client names, session titles, etc.) - only follow the transcript language
+- The field names in JSON must remain in English, but ALL content values must match the transcript language
+`;
   }
 
   /**
@@ -26,11 +75,11 @@ class OpenAIService {
   async downloadFile(fileUrl, fileName, originalUrl = null) {
     const maxRetries = 5;
     const retryDelays = [90000, 60000, 90000, 90000, 90000]; // 1.5m, 1m, 1.5m, 1.5m, 1.5m = 7 min total
-    
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         console.log(`📥 Downloading file (attempt ${attempt + 1}/${maxRetries + 1}): ${fileUrl}`);
-        
+
         const response = await axios({
           method: 'GET',
           url: fileUrl,
@@ -61,7 +110,7 @@ class OpenAIService {
 
       } catch (error) {
         console.error(`❌ Download attempt ${attempt + 1} failed:`, error.message);
-        
+
         // Check if this is a 423 Locked error (Cloudinary still processing transformation)
         if (error.response?.status === 423 && attempt < maxRetries) {
           const delay = retryDelays[attempt];
@@ -69,7 +118,7 @@ class OpenAIService {
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
-        
+
         // If we've exhausted retries and have an original URL, try that as fallback
         if (attempt === maxRetries && originalUrl && originalUrl !== fileUrl) {
           console.log(`🔄 Falling back to original file URL: ${originalUrl}`);
@@ -80,7 +129,7 @@ class OpenAIService {
             throw new Error(`Failed to download file after retries and fallback: ${fallbackError.message}`);
           }
         }
-        
+
         // If no more retries or no original URL, throw the error
         throw new Error(`Failed to download file: ${error.message}`);
       }
@@ -149,7 +198,7 @@ class OpenAIService {
       }
 
       const startTime = Date.now();
-      
+
       // Monitor memory before API call
       const memBefore = process.memoryUsage();
       console.log(`💾 Memory before transcription: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB`);
@@ -158,11 +207,11 @@ class OpenAIService {
       const response = await this.openai.audio.transcriptions.create(transcriptionOptions);
 
       const duration = Date.now() - startTime;
-      
+
       // Monitor memory after API call and force cleanup
       const memAfter = process.memoryUsage();
       console.log(`💾 Memory after transcription: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB`);
-      
+
       if (global.gc) {
         global.gc();
       }
@@ -200,7 +249,7 @@ class OpenAIService {
       if (tempFilePath) {
         this.cleanupTempFileSafe(tempFilePath);
       }
-      
+
       // Periodic cleanup of old temp files
       await this.cleanupTempFiles();
     }
@@ -212,47 +261,47 @@ class OpenAIService {
   async transcribeWithChunking(filePath, fileName, options = {}) {
     const tempDir = path.join(process.cwd(), 'temp', `chunks_${Date.now()}`);
     const { sessionId, socketService } = options;
-    
+
     try {
       // Check if FFmpeg is available
       await this.checkFFmpegAvailable();
-      
+
       // Create temp directory
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
       }
-      
+
       // Split into chunks (simple approach)
       const chunks = await this.splitAudioSimple(filePath, tempDir);
       console.log(`📦 Processing ${chunks.length} chunks`);
-      
+
       // Chunks created - no socket event needed
-      
+
       // Transcribe chunks sequentially with aggressive memory management
       const transcripts = [];
       for (let i = 0; i < chunks.length; i++) {
         // Memory management before chunk processing
         const memBefore = process.memoryUsage();
-        
+
         // Chunk progress - no socket event needed
-        
+
         try {
           const chunkResult = await this.transcribeSingleChunk(chunks[i]);
           transcripts.push(chunkResult);
-          
+
           // Clear chunk file reference immediately
           chunks[i] = null;
-          
+
           // Force garbage collection after each chunk
           if (global.gc) {
             global.gc();
           }
-          
+
           // Memory cleanup after chunk
           const memAfter = process.memoryUsage();
-          
+
           // Chunk completed - no socket event needed
-          
+
           // Emergency memory check
           if (memAfter.heapUsed > 200 * 1024 * 1024) { // 200MB threshold
             console.warn(`⚠️ High memory usage after chunk ${i + 1}: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB`);
@@ -262,13 +311,13 @@ class OpenAIService {
               global.gc(); // Double GC for aggressive cleanup
             }
           }
-          
+
         } catch (chunkError) {
           console.error(`❌ Chunk ${i + 1} failed:`, chunkError.message);
-          
+
           // Clear failed chunk reference
           chunks[i] = null;
-          
+
           // Emit chunk failed event
           if (sessionId && socketService && socketService.sendProgressUpdate) {
             await socketService.sendProgressUpdate(options.userId || 'system', 'transcription_chunk_failed', {
@@ -279,31 +328,31 @@ class OpenAIService {
               messageKey: 'chunkFailed'
             });
           }
-          
+
           // Continue with other chunks - don't fail entire process
-          transcripts.push({ 
+          transcripts.push({
             text: `[Chunk ${i + 1} transcription failed]`,
             failed: true,
             chunkIndex: i + 1
           });
         }
       }
-      
+
       // Clear chunks array completely
       chunks.length = 0;
-      
+
       // Memory-optimized merge - avoid large string concatenation
       const successfulTranscripts = transcripts.filter(t => !t.failed);
-      
+
       if (successfulTranscripts.length === 0) {
         throw new Error('All chunks failed transcription');
       }
-      
+
       // Use streaming approach for large transcripts
       const mergedText = this.mergeTranscriptsMemoryOptimized(successfulTranscripts);
-      
+
       console.log(`✅ Successfully transcribed ${successfulTranscripts.length}/${chunks.length} chunks`);
-      
+
       // Emit chunking completed event
       if (sessionId && socketService && socketService.sendProgressUpdate) {
         await socketService.sendProgressUpdate(options.userId || 'system', 'transcription_chunking_completed', {
@@ -313,7 +362,7 @@ class OpenAIService {
           messageKey: 'chunkingCompleted'
         });
       }
-      
+
       return {
         text: mergedText,
         language: successfulTranscripts[0]?.language || 'en',
@@ -328,20 +377,20 @@ class OpenAIService {
           transcribed_at: new Date().toISOString()
         }
       };
-      
+
     } catch (error) {
       console.error(`❌ Chunked transcription failed:`, error.message);
-      
+
       // Provide helpful error messages
       if (error.message.includes('FFmpeg')) {
         throw new Error('Large file processing requires FFmpeg. Please install FFmpeg: brew install ffmpeg');
       }
-      
+
       throw error;
     } finally {
       // Clean up temp directory with improved error handling
       this.cleanupTempFileSafe(tempDir);
-      
+
       // Periodic cleanup of old temp files
       await this.cleanupTempFiles();
     }
@@ -351,10 +400,10 @@ class OpenAIService {
    * Check if FFmpeg is available on the system
    */
   async checkFFmpegAvailable() {
-    
+
     return new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', ['-version']);
-      
+
       ffmpeg.on('close', (code) => {
         if (code === 0) {
           resolve(true);
@@ -362,7 +411,7 @@ class OpenAIService {
           reject(new Error('FFmpeg not found. Please install FFmpeg.'));
         }
       });
-      
+
       ffmpeg.on('error', (error) => {
         reject(new Error('FFmpeg not found. Please install FFmpeg.'));
       });
@@ -373,26 +422,26 @@ class OpenAIService {
    * Simple FFmpeg splitting based on file size - target 5MB chunks
    */
   async splitAudioSimple(inputPath, outputDir) {
-    
+
     // Get file size and duration
     const stats = fs.statSync(inputPath);
     const fileSizeInMB = stats.size / (1024 * 1024);
     const duration = await this.getAudioDuration(inputPath);
-    
+
     // Calculate target chunk duration to get ~5MB chunks
     const targetChunkSizeMB = 5;
     const estimatedChunkDuration = (duration * targetChunkSizeMB) / fileSizeInMB;
     const chunkDuration = Math.max(estimatedChunkDuration, 60); // Minimum 1 minute chunks
     const numChunks = Math.ceil(duration / chunkDuration);
-    
+
     // File analysis: ${fileSizeInMB.toFixed(1)}MB, ${Math.round(duration/60)} minutes, ${numChunks} chunks
-    
+
     const chunks = [];
-    
+
     for (let i = 0; i < numChunks; i++) {
       const startTime = i * chunkDuration;
       const outputPath = path.join(outputDir, `chunk_${String(i + 1).padStart(3, '0')}.mp3`);
-      
+
       await new Promise((resolve, reject) => {
         const ffmpeg = spawn('ffmpeg', [
           '-i', inputPath,
@@ -402,13 +451,13 @@ class OpenAIService {
           '-avoid_negative_ts', 'make_zero',
           outputPath
         ]);
-        
+
         ffmpeg.on('close', (code) => {
           if (code === 0) {
             // Check actual chunk size
             const chunkStats = fs.statSync(outputPath);
             const chunkSizeMB = chunkStats.size / (1024 * 1024);
-            
+
             chunks.push({
               path: outputPath,
               index: i + 1,
@@ -416,20 +465,20 @@ class OpenAIService {
               endTime: Math.min(startTime + chunkDuration, duration),
               sizeMB: chunkSizeMB
             });
-            
+
             // Chunk created silently
             resolve();
           } else {
             reject(new Error(`FFmpeg failed for chunk ${i + 1}`));
           }
         });
-        
+
         ffmpeg.on('error', (error) => {
           reject(new Error(`FFmpeg error for chunk ${i + 1}: ${error.message}`));
         });
       });
     }
-    
+
     return chunks;
   }
 
@@ -437,7 +486,7 @@ class OpenAIService {
    * Get audio duration using FFprobe
    */
   async getAudioDuration(filePath) {
-    
+
     return new Promise((resolve, reject) => {
       const ffprobe = spawn('ffprobe', [
         '-v', 'quiet',
@@ -445,10 +494,10 @@ class OpenAIService {
         '-show_format',
         filePath
       ]);
-      
+
       let output = '';
       ffprobe.stdout.on('data', (data) => output += data);
-      
+
       ffprobe.on('close', (code) => {
         if (code === 0) {
           try {
@@ -462,7 +511,7 @@ class OpenAIService {
           reject(new Error('Failed to get audio duration'));
         }
       });
-      
+
       ffprobe.on('error', (error) => {
         reject(new Error(`FFprobe error: ${error.message}`));
       });
@@ -479,9 +528,9 @@ class OpenAIService {
         model: 'whisper-1',
         response_format: 'verbose_json'
       };
-      
+
       const response = await this.openai.audio.transcriptions.create(transcriptionOptions);
-      
+
       return {
         text: response.text,
         language: response.language,
@@ -489,7 +538,7 @@ class OpenAIService {
         startTime: chunk.startTime,
         endTime: chunk.endTime
       };
-      
+
     } catch (error) {
       console.error(`❌ Chunk ${chunk.index} transcription failed:`, error.message);
       throw error;
@@ -504,7 +553,7 @@ class OpenAIService {
     const transcriptLength = transcript.length;
     const TOKEN_LIMIT = 5000; // Very low threshold for testing chunked processing (was 20000)
     const CHARS_PER_TOKEN = 4; // Rough estimate
-    
+
     if (transcriptLength > TOKEN_LIMIT * CHARS_PER_TOKEN) {
       console.log(`📊 Large transcript (${transcriptLength} chars), using chunked processing`);
       return await this.generateReportChunked(transcript, reportType, options);
@@ -548,7 +597,7 @@ class OpenAIService {
         } catch (error) {
           console.log('⚠️ Initial JSON parse failed, attempting to sanitize...');
           console.log('Error position:', error.message.match(/position (\d+)/)?.[1] || 'unknown');
-          
+
           // Step 1: Fix common Hebrew abbreviations with quotes (both unescaped and partially-escaped)
           let sanitized = content
             // Fix unescaped Hebrew abbreviations
@@ -576,12 +625,12 @@ class OpenAIService {
             .replace(/נדל\\"ן/g, 'נדל\\\\"ן')
             .replace(/ש\\"ח/g, 'ש\\\\"ח')
             .replace(/הדריכלות/g, 'האדריכלות'); // Fix typo that might cause issues
-          
+
           try {
             return JSON.parse(sanitized);
           } catch (secondError) {
             console.log('⚠️ Basic sanitization failed, trying advanced approach...');
-            
+
             // Step 2: More comprehensive quote handling
             // Find and fix unescaped quotes within string values
             sanitized = sanitized.replace(/"([^"]*(?:\\.[^"]*)*)"/g, (match, content) => {
@@ -589,17 +638,17 @@ class OpenAIService {
               if (content.match(/^\s*[\{\[\]\}]/) || content.includes('":')) {
                 return match;
               }
-              
+
               // Escape unescaped quotes within the string content
               const fixed = content.replace(/(?<!\\)"/g, '\\"');
               return `"${fixed}"`;
             });
-            
+
             try {
               return JSON.parse(sanitized);
             } catch (thirdError) {
               console.log('⚠️ Advanced sanitization failed, trying final approach...');
-              
+
               // Step 3: Last resort - fix malformed JSON structure
               sanitized = sanitized
                 // Fix missing commas before closing braces/brackets
@@ -611,7 +660,7 @@ class OpenAIService {
                 .replace(/:\s*"([^"]*)"([^",\]\}]*)"([^",\]\}]*?)"/g, (match, p1, p2, p3) => {
                   return `: "${p1}\\"${p2}\\"${p3}"`;
                 });
-              
+
               try {
                 return JSON.parse(sanitized);
               } catch (finalError) {
@@ -662,24 +711,24 @@ class OpenAIService {
       // Split transcript into manageable chunks
       const chunks = this.splitTranscriptIntoChunks(transcript);
       console.log(`📦 Processing ${chunks.length} chunks for report generation`);
-      
+
       // Process each chunk to create summaries
       const chunkSummaries = [];
       for (let i = 0; i < chunks.length; i++) {
         const summary = await this.summarizeChunk(chunks[i], reportType, options);
         chunkSummaries.push(summary);
-        
+
         // Small delay to avoid rate limiting
         if (i < chunks.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
-      
+
       // Combine summaries into final report
       const finalReport = await this.combineChunkSummaries(chunkSummaries, reportType, options);
-      
+
       return finalReport;
-      
+
     } catch (error) {
       console.error('Error in chunked report generation:', error);
       throw new Error(`Chunked report generation failed: ${error.message}`);
@@ -692,14 +741,14 @@ class OpenAIService {
   splitTranscriptIntoChunks(transcript) {
     const CHUNK_SIZE = 15000; // Smaller chunks for better processing (~3.75k tokens)
     const chunks = [];
-    
+
     // Split by sentences to maintain context
     const sentences = transcript.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    
+
     let currentChunk = '';
     for (const sentence of sentences) {
       const potentialChunk = currentChunk + sentence + '. ';
-      
+
       if (potentialChunk.length > CHUNK_SIZE && currentChunk.length > 0) {
         chunks.push(currentChunk.trim());
         currentChunk = sentence + '. ';
@@ -707,12 +756,12 @@ class OpenAIService {
         currentChunk = potentialChunk;
       }
     }
-    
+
     // Add the last chunk
     if (currentChunk.trim().length > 0) {
       chunks.push(currentChunk.trim());
     }
-    
+
     // Ensure we have at least 2 chunks for testing if transcript is large enough
     if (chunks.length === 1 && transcript.length > 20000) {
       const midPoint = Math.floor(transcript.length / 2);
@@ -720,7 +769,7 @@ class OpenAIService {
       const secondHalf = transcript.substring(midPoint);
       return [firstHalf, secondHalf];
     }
-    
+
     return chunks;
   }
 
@@ -728,6 +777,8 @@ class OpenAIService {
    * Summarize a single chunk of transcript
    */
   async summarizeChunk(chunk, reportType, options = {}) {
+    const languageInstructions = this.getLanguageRequirementInstructions(options.language);
+
     const summaryPrompt = `Analyze this transcript segment as a professional business consultant, focusing on strategic business intelligence and value demonstration:
 
 TRANSCRIPT SEGMENT:
@@ -739,12 +790,14 @@ CRITICAL ANALYSIS APPROACH:
 - CAPTURE advisor expertise, tips, and professional guidance with supporting evidence
 - IDENTIFY client pain points and challenges that require strategic attention
 - DEMONSTRATE consultation value and MATI service opportunities
-- ANALYZE actual conversation language for proper language matching
+- ${languageInstructions}
 
 For CLIENT REPORTS, extract strategic business insights with supporting evidence:
-1. Client business challenges, pain points, operational issues (2-3 distinct items with quotes when present)
-2. Strategic advice, recommendations, professional guidance from advisor (2-3 distinct items with quotes when present)
-3. Business opportunities, growth potential, risks, strategic concerns (2-3 distinct items with quotes when present)
+- SIGNAL-BASED EXTRACTION: Extract information based on the actual conversation density. If the segment is rich in business value, provide detailed insights. If it is high-level or logistical, be concise but accurate.
+- GROUNDING: Every insight must be anchored to a specific quote from this segment.
+1. Client business challenges, pain points, operational issues (1-3 distinct items with specific quotes)
+2. Strategic advice, recommendations, professional guidance from advisor (1-3 distinct items with specific quotes)
+3. Business opportunities, growth potential, risks, strategic concerns (1-3 distinct items with specific quotes)
 4. Consultation value and MATI service recommendations when discussed (with supporting context)
 
 For ADVISOR REPORTS, focus on performance evaluation with evidence:
@@ -753,14 +806,9 @@ For ADVISOR REPORTS, focus on performance evaluation with evidence:
 3. Areas of strength and improvement opportunities with specific evidence
 
 EVIDENCE REQUIREMENTS:
-- Include compelling supporting quotes for each insight when available
+- Include compelling supporting quotes for each insight
 - Select quotes that best demonstrate the strategic value and context
 - Capture advisor tips, recommendations, and professional guidance verbatim when possible
-
-LANGUAGE ANALYSIS:
-- Analyze the actual conversation content to determine language (Hebrew/English)
-- Generate insights in the same language as the conversation content
-- Ignore session metadata language, focus on actual dialogue language
 
 Respond in JSON format:
 {
@@ -777,7 +825,7 @@ Respond in JSON format:
       messages: [
         {
           role: 'system',
-          content: 'You are a professional business consultant analyzer specializing in strategic business analysis. Generate multiple insights per category when content supports it. Focus on business value and strategic recommendations. CRITICAL JSON ESCAPING: When including Hebrew abbreviations with quotes (like ש"ח, ח"כ, מ"מ, ת"א), leave them unescaped in your JSON strings (ש"ח not ש\\"ח). Do not partially escape quotes as this breaks JSON parsing.'
+          content: 'You are a professional business consultant analyzer specializing in strategic business analysis. Generate multiple insights per category when content supports it. Focus on business value and strategic recommendations. SUPPORTED LANGUAGES: Hebrew, English, Arabic. CRITICAL LANGUAGE RULE: Content values MUST be in the same language as the conversation. CRITICAL JSON ESCAPING: When including Hebrew abbreviations with quotes (like ש"ח, ח\"כ, מ\"מ, ת\"א), leave them unescaped in your JSON strings (ש\"ח not ש\\\"ח). Do not partially escape quotes as this breaks JSON parsing.'
         },
         {
           role: 'user',
@@ -789,39 +837,40 @@ Respond in JSON format:
     });
 
     const rawContent = response.choices[0].message.content;
-    
+
     try {
       return JSON.parse(rawContent);
     } catch (parseError) {
       console.warn('JSON parsing failed, attempting cleanup...');
-      
+
       // Try to extract JSON from markdown code blocks if present
       const jsonMatch = rawContent.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
       if (jsonMatch) {
         try {
           return JSON.parse(jsonMatch[1]);
         } catch (secondError) {
+          console.warn('Markdown JSON extraction failed, continuing with basic cleanup:', secondError.message);
           // Markdown extraction failed, continue to cleanup
         }
       }
-      
+
       // Try basic cleanup
       let cleaned = rawContent
         .replace(/```json\s*/, '')
         .replace(/```\s*$/, '')
         .trim();
-      
+
       try {
         return JSON.parse(cleaned);
       } catch (thirdError) {
-        console.warn('JSON cleanup failed, using fallback extraction');
-        
+        console.warn('JSON cleanup failed, using fallback extraction:', thirdError.message);
+
         // Extract key information using regex as fallback
         const extractArrayFromText = (text, pattern) => {
           const matches = text.match(pattern);
           return matches ? matches.slice(1).filter(Boolean) : [];
         };
-        
+
         // Fallback extraction for basic insights (without quotes structure)
         return {
           summary: rawContent.replace(/[{}"\[\]]/g, '').substring(0, 200),
@@ -863,7 +912,7 @@ Respond in JSON format:
           }
         });
       }
-      
+
       if (summary.advisor_recommendations) {
         summary.advisor_recommendations.forEach(item => {
           if (typeof item === 'string') {
@@ -876,7 +925,7 @@ Respond in JSON format:
           }
         });
       }
-      
+
       if (summary.opportunities_concerns) {
         summary.opportunities_concerns.forEach(item => {
           if (typeof item === 'string') {
@@ -889,7 +938,7 @@ Respond in JSON format:
           }
         });
       }
-      
+
       if (summary.consultation_value) {
         summary.consultation_value.forEach(item => {
           if (typeof item === 'string') {
@@ -902,7 +951,7 @@ Respond in JSON format:
           }
         });
       }
-      
+
       if (summary.key_topics) aggregated.key_topics.push(...summary.key_topics);
       if (summary.summary) aggregated.summaries.push(summary.summary);
     });
@@ -955,31 +1004,31 @@ Respond in JSON format:
    */
   buildReportPromptFromSummaries(aggregated, reportType, options = {}) {
     const { sessionContext, notes, language } = options;
-    
+
     let prompt = `Based on the following aggregated insights from a business consultation meeting, generate a comprehensive ${reportType} report that demonstrates MATI's professional expertise and value.\n\n`;
-    
+
     if (sessionContext) {
       prompt += `SESSION CONTEXT:\n`;
       prompt += `Client: ${sessionContext.clientName}\n`;
       prompt += `Advisor: ${sessionContext.adviserName}\n`;
       prompt += `Date: ${new Date(sessionContext.sessionDate).toLocaleDateString()}\n`;
-      prompt += `Duration: ${sessionContext.duration ? Math.round(sessionContext.duration/60) : 'Unknown'} minutes\n\n`;
+      prompt += `Duration: ${sessionContext.duration ? Math.round(sessionContext.duration / 60) : 'Unknown'} minutes\n\n`;
     }
 
     prompt += `AGGREGATED STRATEGIC INSIGHTS:\n\n`;
-    
+
     if (aggregated.client_business_insights.length > 0) {
       prompt += `CLIENT BUSINESS CHALLENGES & INSIGHTS:\n${aggregated.client_business_insights.map(insight => `- ${insight}`).join('\n')}\n\n`;
     }
-    
+
     if (aggregated.advisor_recommendations.length > 0) {
       prompt += `ADVISOR RECOMMENDATIONS & GUIDANCE:\n${aggregated.advisor_recommendations.map(rec => `- ${rec}`).join('\n')}\n\n`;
     }
-    
+
     if (aggregated.opportunities_concerns.length > 0) {
       prompt += `OPPORTUNITIES, RISKS & STRATEGIC CONCERNS:\n${aggregated.opportunities_concerns.map(item => `- ${item}`).join('\n')}\n\n`;
     }
-    
+
     if (aggregated.consultation_value.length > 0) {
       prompt += `CONSULTATION VALUE & SERVICE RECOMMENDATIONS:\n${aggregated.consultation_value.map(value => `- ${value}`).join('\n')}\n\n`;
     }
@@ -992,21 +1041,16 @@ Respond in JSON format:
       prompt += `SPECIAL INSTRUCTIONS FROM ADVISER:\n${notes}\n\n`;
     }
 
-    if (language) {
-      prompt += `IMPORTANT: Generate the report in ${language} language to match the original meeting language.\n\n`;
-    }
-
     if (reportType === 'client') {
       prompt += `CRITICAL INSTRUCTIONS FOR CLIENT REPORT:
 
 GENERAL SUMMARY REQUIREMENTS:
-Create a comprehensive executive summary (aim for 150-250 words when aggregated content allows) that synthesizes the aggregated insights into a cohesive business intelligence overview. Include the following elements ONLY when the aggregated insights support them - do not fabricate information:
-- Client's business context and current situation
-- Primary challenges and pain points identified  
-- Strategic opportunities and growth potential discussed
-- Specific value delivered through MATI's consultation
-- Key business outcomes and strategic implications
-Use the aggregated insights to create a substantive, detailed summary that demonstrates professional consultation value.
+- GROUNDING: Include the following elements ONLY when the aggregated insights support them:
+  * Client's business context and situation based on the transcript
+  * Primary challenges and pain points identified  
+  * Strategic opportunities or solutions discussed
+  * Key advisor recommendations or guidance provided
+  * Expected business outcomes or next steps discussed
 
 KEY INSIGHTS REQUIREMENTS:
 - Generate 5-9 key insights total, with multiple insights per category when the aggregated content supports it
@@ -1015,16 +1059,22 @@ KEY INSIGHTS REQUIREMENTS:
   * "decisions made" - Use advisor recommendations and guidance above  
   * "opportunities/risks or concerns that came up" - Use opportunities, risks, and strategic concerns above
 - Don't limit yourself to one insight per category - if you have multiple distinct business challenges, create separate insights for each
-- If you have multiple different advisor recommendations, create separate insights for each
-- Present insights as professional business analysis that demonstrates strategic value
-- Include consultation service recommendations when relevant
+- Present insights as professional business analysis based strictly on the transcript
 - Support each insight with compelling evidence from the conversation
 
-IMPORTANT: Multiple insights per category are expected and encouraged when content supports it.`;
+ACTION ITEMS REQUIREMENTS:
+- action_items: Capture both explicit tasks and strategic next steps that emerged from the insights:
+  - task: Frame as strategic business actions with clear business context and rationale
+  - owner: Specify responsibility clearly - use "client", "adviser", or specific names when mentioned
+  - deadline: Extract specific timelines mentioned or use null if not specified
+  - status: Use "open" for new tasks, "in progress" for ongoing items, "completed" for finished tasks - if unknown or pending, use "open"
+
+IMPORTANT: Multiple insights per category are expected and encouraged when content supports it.\n\n`;
     }
 
+    prompt += `\n\n${this.getLanguageRequirementInstructions(options.language || language)}`;
     prompt += `\n\nPlease generate a structured ${reportType} report based on these strategic insights.`;
-    
+
     return prompt;
   }
 
@@ -1057,30 +1107,21 @@ Session Information:
 
     // Build notes section if provided
     let notesSection = '';
+    const languageInstructions = this.getLanguageRequirementInstructions(language);
+
     if (notes && notes.trim()) {
       notesSection = `
 SPECIAL INSTRUCTIONS FROM ADVISER:
 ${notes.trim()}
 
 IMPORTANT: Please take these instructions into account when generating the report.
-CRITICAL LANGUAGE REQUIREMENT: Unless the instructions above specifically request a different language, analyze the actual conversation content in the transcript and generate ALL report content in the SAME language as the conversation. If the conversation is in Hebrew, write ALL content in Hebrew. If the conversation is in English, write ALL content in English. IGNORE session metadata language - only follow the transcript conversation language.
+CRITICAL LANGUAGE REQUIREMENT: Unless the instructions above specifically request a different language, follow these rules:
+${languageInstructions}
 
 `;
     } else {
       // Even without notes, add language preservation instruction
-      const languageInstruction = language ?
-        `DETECTED TRANSCRIPT LANGUAGE: ${language.toUpperCase()}` :
-        'ANALYZE the transcript language carefully - look at the actual conversation content, not the session metadata';
-
-      notesSection = `
-CRITICAL LANGUAGE REQUIREMENT: 
-- ${languageInstruction}
-- If the transcript conversation is in Hebrew, generate ALL report content in Hebrew
-- If the transcript conversation is in English, generate ALL report content in English
-- IGNORE the language of session metadata (client names, session titles, etc.) - only follow the transcript language
-- The field names in JSON must remain in English, but ALL content values must match the transcript language
-
-`;
+      notesSection = languageInstructions;
     }
 
     const basePrompt = `Please analyze the following transcript and generate a comprehensive ${reportType} report.
@@ -1090,7 +1131,12 @@ ${transcript}
 
 
 IMPORTANT ANALYSIS INSTRUCTIONS:
-- CRITICAL LANGUAGE RULE: Analyze the actual conversation content in the transcript (not session metadata like names/titles). Generate ALL report content values in the SAME language as the conversation. Hebrew conversation = Hebrew content. English conversation = English content. JSON field names stay English.
+- CRITICAL LANGUAGE RULE: Analyze the actual conversation content in the transcript (not session metadata like names/titles). Generate ALL report content values in the SAME language as the conversation. 
+  * Supported languages: Hebrew, English, Arabic.
+  * Hebrew conversation = Hebrew content. 
+  * English conversation = English content.
+  * Arabic conversation = Arabic content.
+  JSON field names stay English.
 - CRITICAL: Respond ONLY with valid JSON. Do not include any markdown formatting, explanatory text, or content outside the JSON object.
 - Use the actual session information provided above instead of placeholders. Replace any [Insert X] placeholders with the real data provided.
 - Carefully read through the transcript to identify different speakers based on context clues, names mentioned, and conversation flow
@@ -1182,21 +1228,21 @@ Generate a comprehensive client report that demonstrates MATI's professional exp
 Analyze the conversation strategically to create a professional business consultation report:
 
 ### General Summary
-- general_summary: Write a comprehensive professional executive summary (aim for 150-250 words when content allows) that positions the consultation as valuable business intelligence. Structure this summary to include the following elements ONLY when the actual conversation content supports them - do not fabricate information for short conversations or limited content:
+  * GROUNDING: Structure this summary to include the following elements ONLY when the actual conversation content supports them:
+    1. CLIENT BUSINESS CONTEXT: Brief overview of the client's business or situation
+    2. KEY CHALLENGES IDENTIFIED: Primary business challenges or pain points discovered
+    3. STRATEGIC OPPORTUNITIES: Main growth opportunities or solutions discussed
+    4. ADVISOR GUIDANCE: Specific recommendations and professional insights provided
+    5. BUSINESS OUTCOMES: Key takeaways and next steps discussed
+  * Present the findings as professional business intelligence based actual conversation content.
 
-  1. CLIENT BUSINESS CONTEXT: Brief overview of the client's business, industry, and current situation based on the conversation
-  2. KEY CHALLENGES IDENTIFIED: Primary business challenges or pain points discovered during the consultation (when discussed)
-  3. STRATEGIC OPPORTUNITIES: Main growth opportunities, potential solutions, or strategic directions discussed (when relevant)
-  4. CONSULTATION VALUE: Specific value delivered through MATI's expertise, including advisor insights, recommendations, and guidance provided
-  5. BUSINESS OUTCOMES: Key takeaways and strategic implications for the client's business development (when applicable)
-
-Present this as a strategic business assessment that demonstrates MATI's deep understanding of the client's needs and showcases the professional value delivered. Use specific details from the conversation to make the summary substantive and relevant, avoiding generic language. For shorter conversations or limited content, focus on the elements that were actually discussed rather than trying to meet all requirements.
+Present this as a strategic business assessment. Use specific details from the conversation to make the summary substantive and relevant, avoiding generic language. 
 
 ### Target Summary  
-- target_summary: Create a strategic recommendations section that synthesizes the most important business outcomes and next steps. Include specific advisor recommendations, consultation value propositions, and suggested MATI services when discussed. This should read like professional business consulting guidance that motivates continued engagement with MATI.
+- target_summary: Create a strategic recommendations section that synthesizes the most important business outcomes and next steps. Include specific advisor recommendations and discussed next steps. Do not invent mentions of organization-specific services or "consultation value" unless they were a real part of the conversation.
 
 ### Key Insights (5-9 insights total)
-- key_insights: Identify the most strategically important insights from the consultation. Generate multiple insights per category when the conversation content supports it. For longer consultations (30+ minutes), aim for 2-3 insights per category when relevant content exists.
+- key_insights: Identify the most strategically important insights from the consultation. Generate multiple insights per category when the conversation content supports it. For more substantive and detailed conversations, aim for 2-3 insights per category when relevant content exists.
 
   Priority areas to analyze:
   1. Critical client pain points and business challenges that require attention
@@ -1207,7 +1253,7 @@ Present this as a strategic business assessment that demonstrates MATI's deep un
   - category: Assign to the most appropriate category based on content:
     * "what we learned about the clients business" - Client challenges, pain points, business situation analysis, industry insights, operational issues
     * "decisions made" - Strategic advice, recommendations, guidance provided by advisor, solutions discussed, methodologies suggested
-    * "opportunities/risks or concerns that came up" - Growth opportunities, strategic concerns, future planning, market opportunities, potential risks
+    * "opportunities/risks or concerns came up" - Growth opportunities, strategic concerns, future planning, market opportunities, potential risks
   - content: Present as professional business analysis that demonstrates insight and expertise, not just conversation summary
   - supporting_quotes: Include the most compelling evidence from the conversation that supports this strategic insight
 
@@ -1218,7 +1264,7 @@ Present this as a strategic business assessment that demonstrates MATI's deep un
   - task: Frame as strategic business actions with clear business context and rationale
   - owner: Specify responsibility clearly - use "client", "adviser", or specific names when mentioned
   - deadline: Extract specific timelines mentioned or use null if not specified
-  - status: Use "open" for new tasks, "in progress" for ongoing items, "completed" for finished tasks
+  - status: Use "open" for new tasks, "in progress" for ongoing items, "completed" for finished tasks - if unknown or pending, use "open"
 
 ## STRATEGIC ANALYSIS INSTRUCTIONS:
 - PRIORITIZE the most business-critical content - focus on the 20% of conversation that delivers 80% of the value
@@ -1241,8 +1287,10 @@ Present this as a strategic business assessment that demonstrates MATI's deep un
 CRITICAL LANGUAGE REQUIREMENT FOR CLIENT REPORT:
 - ANALYZE the actual conversation content in the transcript to determine language
 - IGNORE session metadata language (client names, session titles, etc.)
+- Supported languages: Hebrew, English, Arabic.
 - If the conversation is in Hebrew, generate ALL content values in Hebrew
 - If the conversation is in English, generate ALL content values in English
+- If the conversation is in Arabic, generate ALL content values in Arabic
 - JSON field names must remain in English for parsing
 - ALL content, insights, quotes, and action items must match the conversation language exactly
 
@@ -1256,12 +1304,12 @@ Generate all content in the same language as the transcript, but use English fie
    * Get system prompt based on report type
    */
   getSystemPrompt(reportType) {
-    const baseSystem = "You are specialized in analyzing business conversations and generating professional reports. You can handle various types of audio content including meetings, consultations, presentations, and monologues. Always use the actual session information provided (client names, adviser names, dates, etc.) instead of generic placeholders like [Insert Name] or [Insert Date]. Be adaptive to the content type and provide valuable insights regardless of the conversation format. COMPANY CONTEXT: MATI JLM (מט״י ירושלים) stands for מרכז טיפוח יזמות (Center for Entrepreneurship Development) and is the organization that employs all the advisers conducting these business consultations. When referencing the organization, use the correct spelling: MATI JLM or מט״י ירושלים. CRITICAL LANGUAGE RULE: Analyze the actual conversation language in the transcript content (ignore session metadata language). If the conversation is in Hebrew, generate ALL content values in Hebrew. If the conversation is in English, generate ALL content values in English. JSON field names must remain in English, but content values must match the conversation language exactly. CRITICAL JSON ESCAPING: When including Hebrew abbreviations with quotes (like ש\"ח, ח\"כ, מ\"מ, ת\"א), leave them unescaped in your JSON strings (ש\"ח not ש\\\"ח). Do not partially escape quotes as this breaks JSON parsing. For any quotes within Hebrew text, either leave them unescaped or properly double-escape them. IMPORTANT: You must respond with a valid JSON object only - no markdown, no additional text, just pure JSON.";
+    const baseSystem = "You are specialized in analyzing business conversations and generating professional reports. You can handle various types of audio content including meetings, consultations, presentations, and monologues. Always use the actual session information provided instead of generic placeholders. BACKGROUND CONTEXT: MATI JLM (מט״י ירושלים) is the organization conducting these business consultations. Use this for context. Do not fabricate organization presence. CRITICAL LANGUAGE RULE: Analyze the actual conversation language in the transcript content (ignore session metadata language). Content values must match the conversation language exactly. JSON field names must remain in English. CRITICAL JSON ESCAPING: When including Hebrew abbreviations with quotes (like ש\"ח, ח\"כ, מ\"מ, ת\"א), leave them unescaped in your JSON strings (ש\"ח not ש\\\"ח). Do not partially escape quotes as this breaks JSON parsing. For any quotes within Hebrew text, either leave them unescaped or properly double-escape them. IMPORTANT: You must respond with a valid JSON object only - no markdown, no additional text, just pure JSON.";
 
     if (reportType === 'adviser' || reportType === 'advisor') {
-      return baseSystem + " Generate advisor reports with conversation analysis and performance evaluation. Include specific client details and personalize the report with actual names and information provided. The report should contain 5 main sections with comprehensive analysis. Return the response as a JSON object with the following structure: {\"topics\": [{\"topic\": \"string\", \"sub_topics\": [\"array of strings\"], \"time_percentage\": \"number\"}], \"topics_covered\": {\"introducing_advisor_percentage\": \"number\", \"introducing_mati_percentage\": \"number\", \"opening_percentage\": \"number\", \"collecting_info_percentage\": \"number\", \"actual_content_percentage\": \"number\"}, \"client_readiness_score\": \"number (0-100)\", \"listening\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"clarity\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"continuation\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"things_to_preserve\": [{\"title\": \"string\", \"description\": \"string\"}], \"needs_improvement\": [{\"title\": \"string\", \"description\": \"string\"}]}";
+      return baseSystem + " Generate advisor reports with conversation analysis and performance evaluation. Return the response as a JSON object with the following structure: {\"topics\": [{\"topic\": \"string\", \"sub_topics\": [\"array of strings\"], \"time_percentage\": \"number\"}], \"topics_covered\": {\"introducing_advisor_percentage\": \"number\", \"introducing_mati_percentage\": \"number\", \"opening_percentage\": \"number\", \"collecting_info_percentage\": \"number\", \"actual_content_percentage\": \"number\"}, \"client_readiness_score\": \"number (0-100)\", \"listening\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"clarity\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"continuation\": {\"score\": \"number (0-5)\", \"description\": \"string\", \"supporting_quote\": \"string\"}, \"things_to_preserve\": [{\"title\": \"string\", \"description\": \"string\"}], \"needs_improvement\": [{\"title\": \"string\", \"description\": \"string\"}]}";
     } else if (reportType === 'client') {
-      return baseSystem + " You are a professional business consultant generating comprehensive client reports for MATI JLM's entrepreneurship development services. Create professional, strategic reports that demonstrate expertise and value. PROFESSIONAL TONE: Write in formal business language appropriate to the conversation language. Present insights as strategic business analysis, not conversation summaries. Focus on business implications and actionable outcomes. ANALYSIS APPROACH: Prioritize the most significant business insights and strategic recommendations. Identify client pain points, challenges, and growth opportunities. Capture advisor expertise, tips, and professional guidance provided. Synthesize information to show business value and next steps. CONTENT PRIORITIES: 1) Client's key business challenges and pain points, 2) Strategic advice and recommendations provided by advisor, 3) Business opportunities and growth potential identified, 4) Professional consultation value and MATI service recommendations. EVIDENCE-BASED: Support all insights with specific conversation evidence, but present analysis professionally rather than as raw extraction. Include consultation package recommendations when discussed or implied by business needs. Return the response as a JSON object with the following structure: {\"general_summary\": \"string (professional executive summary of client's business situation and consultation outcomes)\", \"target_summary\": \"string (strategic recommendations and next steps, including consultation services when relevant)\", \"key_insights\": [{\"category\": \"string (must be exactly one of: 'what we learned about the clients business', 'decisions made', 'opportunities/risks or concerns that came up')\", \"content\": \"string (professional business analysis)\", \"supporting_quotes\": [\"array of key evidence from conversation\"]}], \"action_items\": [{\"task\": \"string (strategic action with business context)\", \"owner\": \"string (client/adviser/other entity name)\", \"deadline\": \"string or null\", \"status\": \"string (open/in progress/completed)\"}]}";
+      return baseSystem + " GROUNDING RULE: Your analysis must be strictly anchored to the transcript. DO NOT fabricate information, advice, or organization-specific branding. Focus on business implications and outcomes actually discussed. Return the response as a JSON object with the following structure: {\"general_summary\": \"string\", \"target_summary\": \"string\", \"key_insights\": [{\"category\": \"string (must be exactly one of: 'what we learned about the clients business', 'decisions made', 'opportunities/risks or concerns that came up')\", \"content\": \"string\", \"supporting_quotes\": [\"array of evidence\"]}], \"action_items\": [{\"task\": \"string\", \"owner\": \"string\", \"deadline\": \"string or null\", \"status\": \"string\"}]}";
     }
 
     return baseSystem;
@@ -1313,7 +1361,7 @@ Generate all content in the same language as the transcript, but use English fie
    */
   mergeTranscriptsMemoryOptimized(transcripts) {
     console.log(`🔄 Merging ${transcripts.length} transcripts with memory optimization...`);
-    
+
     // For very small transcripts, use simple join
     if (transcripts.length <= 3) {
       const result = transcripts.map(t => t.text || '').join(' ');
@@ -1324,42 +1372,42 @@ Generate all content in the same language as the transcript, but use English fie
     // Use streaming approach with smaller chunks and aggressive cleanup
     const CHUNK_SIZE = 5; // Smaller chunks to reduce memory pressure
     const chunks = [];
-    
+
     // Process in smaller batches
     for (let i = 0; i < transcripts.length; i += CHUNK_SIZE) {
       const batch = transcripts.slice(i, i + CHUNK_SIZE);
       const batchText = batch.map(t => (t.text || '').trim()).filter(Boolean).join(' ');
-      
+
       if (batchText.length > 0) {
         chunks.push(batchText);
       }
-      
+
       // Clear batch references immediately
       batch.length = 0;
-      
+
       // Force garbage collection every few batches
       if (i % (CHUNK_SIZE * 2) === 0 && global.gc) {
         global.gc();
       }
     }
-    
+
     // Final merge with memory monitoring
     const startMemory = process.memoryUsage().heapUsed;
     console.log(`💾 Starting final merge with ${chunks.length} chunks, memory: ${Math.round(startMemory / 1024 / 1024)}MB`);
-    
+
     const result = chunks.join(' ');
-    
+
     // Clear chunks array immediately
     chunks.length = 0;
-    
+
     // Force cleanup after merge
     if (global.gc) {
       global.gc();
     }
-    
+
     const endMemory = process.memoryUsage().heapUsed;
     console.log(`✅ Merge completed: ${result.length} chars, memory: ${Math.round(endMemory / 1024 / 1024)}MB`);
-    
+
     return result;
   }
 
@@ -1371,7 +1419,7 @@ Generate all content in the same language as the transcript, but use English fie
       path.join(process.cwd(), 'temp'),
       path.join(__dirname, '../../uploads/temp')
     ];
-    
+
     if (basePath) {
       tempDirs.push(basePath);
     }
@@ -1381,11 +1429,11 @@ Generate all content in the same language as the transcript, but use English fie
         if (fs.existsSync(tempDir)) {
           const files = fs.readdirSync(tempDir);
           const now = Date.now();
-          
+
           for (const file of files) {
             const filePath = path.join(tempDir, file);
             const stats = fs.statSync(filePath);
-            
+
             // Delete files older than 1 hour
             const ageMs = now - stats.mtime.getTime();
             if (ageMs > 60 * 60 * 1000) {

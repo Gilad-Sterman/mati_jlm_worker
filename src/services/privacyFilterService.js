@@ -3,6 +3,26 @@ import { supabaseAdmin } from '../config/database.js';
 class PrivacyFilterService {
   constructor() {
     this.supabase = supabaseAdmin;
+
+    // Supported languages for full filtering
+    this.SUPPORTED_LANGUAGES = ['he', 'en', 'ar'];
+
+    // Language mapping for normalization
+    this.LANGUAGE_MAP = {
+      'he': 'he', 'hebrew': 'he', 'iw': 'he',
+      'en': 'en', 'english': 'en',
+      'ar': 'ar', 'arabic': 'ar',
+      'el': 'el', 'greek': 'el'
+    };
+  }
+
+  /**
+   * Normalize language code/name to standard ISO code
+   */
+  normalizeLanguage(lang) {
+    if (!lang) return null;
+    const normalized = lang.toLowerCase().trim();
+    return this.LANGUAGE_MAP[normalized] || normalized;
   }
 
   /**
@@ -14,35 +34,36 @@ class PrivacyFilterService {
    */
   async filterTranscription(text, language, sessionId) {
     try {
-      console.log(`[PrivacyFilter] Starting privacy filtering for session ${sessionId}, language: ${language}`);
-      
-      const isConservative = this.shouldUseConservativeFiltering(language);
+      const normalizedLang = this.normalizeLanguage(language);
+      console.log(`[PrivacyFilter] Starting privacy filtering for session ${sessionId}, language: ${language} (normalized: ${normalizedLang})`);
+
+      const isConservative = this.shouldUseConservativeFiltering(normalizedLang);
       const filteredItems = [];
       let filteredText = text;
 
       if (isConservative) {
         // Conservative filtering - only perfect credit cards
-        const result = this.filterPerfectCreditCards(filteredText, language);
+        const result = this.filterPerfectCreditCards(filteredText, normalizedLang);
         filteredText = result.text;
         filteredItems.push(...result.items);
       } else {
-        // Full filtering for Hebrew and English
-        const creditCardResult = this.filterCreditCards(filteredText, language);
+        // FULL filtering mode - used for Hebrew, English, Arabic, and Unknown/Unsupported languages
+        // for maximum safety (relying on checksums and context keywords)
+
+        const creditCardResult = this.filterCreditCards(filteredText, normalizedLang);
         filteredText = creditCardResult.text;
         filteredItems.push(...creditCardResult.items);
 
-        // Israeli ID only for Hebrew - filter BEFORE bank accounts to avoid conflicts
-        if (language === 'he') {
-          const idResult = this.filterIsraeliIds(filteredText, language);
-          filteredText = idResult.text;
-          filteredItems.push(...idResult.items);
-        }
+        // Israeli ID - Checksum based, safe to run even if not explicitly Hebrew
+        const idResult = this.filterIsraeliIds(filteredText, normalizedLang);
+        filteredText = idResult.text;
+        filteredItems.push(...idResult.items);
 
-        const bankAccountResult = this.filterBankAccounts(filteredText, language);
+        const bankAccountResult = this.filterBankAccounts(filteredText, normalizedLang);
         filteredText = bankAccountResult.text;
         filteredItems.push(...bankAccountResult.items);
 
-        const phoneResult = this.filterPhoneNumbers(filteredText, language);
+        const phoneResult = this.filterPhoneNumbers(filteredText, normalizedLang);
         filteredText = phoneResult.text;
         filteredItems.push(...phoneResult.items);
       }
@@ -58,7 +79,7 @@ class PrivacyFilterService {
       };
 
       console.log(`[PrivacyFilter] Completed filtering: ${filteredItems.length} items filtered`);
-      
+
       return {
         filteredText,
         auditData
@@ -87,7 +108,12 @@ class PrivacyFilterService {
    * @returns {boolean}
    */
   shouldUseConservativeFiltering(language) {
-    return language !== 'he' && language !== 'en';
+    const normalized = this.normalizeLanguage(language);
+
+    // List of languages where we are VERY sure we DON'T want full filtering
+    // (e.g. because of high false positive risk or performance).
+    const EXCLUDED_FROM_FULL = ['fr', 'es', 'de', 'ru', 'it', 'ja', 'zh'];
+    return EXCLUDED_FROM_FULL.includes(normalized);
   }
 
   /**
@@ -96,8 +122,12 @@ class PrivacyFilterService {
    * @returns {string}
    */
   getReplacementText(language) {
-    if (language === 'he') {
+    const normalized = this.normalizeLanguage(language);
+    if (normalized === 'he') {
       return '[מידע מוסתר]';
+    }
+    if (normalized === 'ar') {
+      return '[بيانات مخفية]';
     }
     return '[REDACTED]';
   }
@@ -111,14 +141,14 @@ class PrivacyFilterService {
   filterPerfectCreditCards(text, language) {
     const items = [];
     const replacement = this.getReplacementText(language);
-    
+
     // Match perfect 13-19 digit sequences
     const perfectCardPattern = /\b\d{13,19}\b/g;
-    
+
     const filteredText = text.replace(perfectCardPattern, (match, offset) => {
       if (this.isValidCreditCard(match)) {
         const context = this.getContext(text, offset, match.length);
-        
+
         items.push({
           type: 'credit_card',
           position: offset,
@@ -127,7 +157,7 @@ class PrivacyFilterService {
           originalValue: match,
           method: 'perfect_match_luhn'
         });
-        
+
         return replacement;
       }
       return match;
@@ -145,10 +175,10 @@ class PrivacyFilterService {
   filterCreditCards(text, language) {
     const items = [];
     const replacement = this.getReplacementText(language);
-    
+
     // Normalize text for fuzzy matching
     let normalizedText = this.normalizeNumbers(text);
-    
+
     // Pattern for credit card numbers (13-19 digits with optional separators)
     const cardPatterns = [
       /\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b/g, // 16 digits
@@ -160,11 +190,11 @@ class PrivacyFilterService {
     cardPatterns.forEach(pattern => {
       normalizedText = normalizedText.replace(pattern, (match, offset) => {
         const cleanNumber = match.replace(/[\s\-]/g, '');
-        
+
         if (cleanNumber.length >= 13 && cleanNumber.length <= 19) {
           const confidence = this.isValidCreditCard(cleanNumber) ? 'high' : 'medium';
           const context = this.getContext(text, offset, match.length);
-          
+
           // Only filter if high confidence or if context suggests it's a credit card
           if (confidence === 'high' || this.hasCardContext(context)) {
             items.push({
@@ -175,11 +205,11 @@ class PrivacyFilterService {
               originalValue: match,
               method: 'fuzzy_match'
             });
-            
+
             return replacement;
           }
         }
-        
+
         return match;
       });
     });
@@ -196,9 +226,9 @@ class PrivacyFilterService {
   filterBankAccounts(text, language) {
     const items = [];
     const replacement = this.getReplacementText(language);
-    
+
     let normalizedText = this.normalizeNumbers(text);
-    
+
     // Israeli bank account patterns
     const bankPatterns = [
       /\b\d{2}[\s\-]?\d{3}[\s\-]?\d{6,8}\b/g, // Branch-Account format
@@ -208,7 +238,7 @@ class PrivacyFilterService {
     bankPatterns.forEach(pattern => {
       normalizedText = normalizedText.replace(pattern, (match, offset) => {
         const context = this.getContext(text, offset, match.length);
-        
+
         if (this.hasBankContext(context)) {
           items.push({
             type: 'bank_account',
@@ -218,10 +248,10 @@ class PrivacyFilterService {
             originalValue: match,
             method: 'context_match'
           });
-          
+
           return replacement;
         }
-        
+
         return match;
       });
     });
@@ -238,16 +268,16 @@ class PrivacyFilterService {
   filterIsraeliIds(text, language) {
     const items = [];
     const replacement = this.getReplacementText(language);
-    
+
     let normalizedText = this.normalizeNumbers(text);
-    
+
     // Israeli ID pattern (9 digits)
     const idPattern = /\b\d{9}\b/g;
-    
+
     normalizedText = normalizedText.replace(idPattern, (match, offset) => {
       if (this.isValidIsraeliId(match)) {
         const context = this.getContext(text, offset, match.length);
-        
+
         items.push({
           type: 'israeli_id',
           position: offset,
@@ -256,10 +286,10 @@ class PrivacyFilterService {
           originalValue: match,
           method: 'checksum_validation'
         });
-        
+
         return replacement;
       }
-      
+
       return match;
     });
 
@@ -275,9 +305,9 @@ class PrivacyFilterService {
   filterPhoneNumbers(text, language) {
     const items = [];
     const replacement = this.getReplacementText(language);
-    
+
     let normalizedText = this.normalizeNumbers(text);
-    
+
     // Phone number patterns
     const phonePatterns = [
       /\b0\d{1,2}[\s\-]?\d{7,8}\b/g, // Israeli format
@@ -288,7 +318,7 @@ class PrivacyFilterService {
     phonePatterns.forEach(pattern => {
       normalizedText = normalizedText.replace(pattern, (match, offset) => {
         const context = this.getContext(text, offset, match.length);
-        
+
         if (this.hasPhoneContext(context)) {
           items.push({
             type: 'phone_number',
@@ -298,10 +328,10 @@ class PrivacyFilterService {
             originalValue: match,
             method: 'context_match'
           });
-          
+
           return replacement;
         }
-        
+
         return match;
       });
     });
@@ -322,23 +352,23 @@ class PrivacyFilterService {
     };
 
     let normalized = text;
-    
+
     // First pass: convert word numbers to digits
     Object.entries(wordToNumber).forEach(([word, digit]) => {
       const regex = new RegExp(`\\b${word}\\b`, 'gi');
       normalized = normalized.replace(regex, digit);
     });
-    
+
     // Second pass: clean up multiple spaces and normalize separators
     normalized = normalized.replace(/\s+/g, ' '); // Multiple spaces to single space
     normalized = normalized.replace(/\s*-\s*/g, '-'); // Clean up dashes
-    
+
     // Third pass: convert spaced digit sequences to continuous numbers
     // Match sequences like "4 5 3 2 1 2 3 4" and convert to "45321234"
     normalized = normalized.replace(/\b(\d\s+){3,}\d\b/g, (match) => {
       return match.replace(/\s+/g, '');
     });
-    
+
     // Fourth pass: handle phone number patterns with dashes
     // Convert "0 5 2-1 2 3-4 5 6 7" to "052-123-4567"
     normalized = normalized.replace(/\b(\d\s+){2,}\d(-\d(\s+\d){2,}){1,2}\b/g, (match) => {
@@ -370,9 +400,10 @@ class PrivacyFilterService {
   hasCardContext(context) {
     const cardKeywords = [
       'credit', 'card', 'visa', 'mastercard', 'amex', 'american express',
-      'כרטיס', 'אשראי', 'ויזה', 'מאסטרקארד'
+      'כרטיס', 'אשראי', 'ויזה', 'מאסטרקארד',
+      'بطاقة', 'ائتمان', 'فيزا'
     ];
-    
+
     const lowerContext = context.toLowerCase();
     return cardKeywords.some(keyword => lowerContext.includes(keyword));
   }
@@ -384,9 +415,10 @@ class PrivacyFilterService {
    */
   hasBankContext(context) {
     const bankKeywords = [
-      'bank', 'account', 'branch', 'routing', 'חשבון', 'בנק', 'סניף'
+      'bank', 'account', 'branch', 'routing', 'חשבון', 'בנק', 'סניף',
+      'بنك', 'حساب', 'فرع'
     ];
-    
+
     const lowerContext = context.toLowerCase();
     return bankKeywords.some(keyword => lowerContext.includes(keyword));
   }
@@ -399,9 +431,10 @@ class PrivacyFilterService {
   hasPhoneContext(context) {
     const phoneKeywords = [
       'phone', 'mobile', 'cell', 'number', 'call', 'landline', 'reach', 'contact',
-      'טלפון', 'נייד', 'מספר', 'צלצלו', 'התקשרו'
+      'טלפון', 'נייד', 'מספר', 'צלצלו', 'התקשרו',
+      'هاتف', 'جوال', 'رقم'
     ];
-    
+
     const lowerContext = context.toLowerCase();
     return phoneKeywords.some(keyword => lowerContext.includes(keyword));
   }
@@ -413,7 +446,7 @@ class PrivacyFilterService {
    */
   isValidCreditCard(number) {
     const cleanNumber = number.replace(/\D/g, '');
-    
+
     if (cleanNumber.length < 13 || cleanNumber.length > 19) {
       return false;
     }

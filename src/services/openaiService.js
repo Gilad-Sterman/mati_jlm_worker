@@ -571,7 +571,7 @@ CRITICAL LANGUAGE REQUIREMENT:
       const startTime = Date.now();
 
       const response = await this.openai.chat.completions.create({
-        model: options.model || 'gpt-4o-mini',
+        model: options.model || 'gpt-4o',
         messages: [
           {
             role: 'system',
@@ -582,8 +582,8 @@ CRITICAL LANGUAGE REQUIREMENT:
             content: prompt
           }
         ],
-        max_tokens: options.max_tokens || 2000,
-        temperature: options.temperature || 0.7
+        max_tokens: options.max_tokens || 3000,
+        temperature: options.temperature || 0.6
       });
 
       const duration = Date.now() - startTime;
@@ -598,8 +598,35 @@ CRITICAL LANGUAGE REQUIREMENT:
           console.log('⚠️ Initial JSON parse failed, attempting to sanitize...');
           console.log('Error position:', error.message.match(/position (\d+)/)?.[1] || 'unknown');
 
+          // Step 0: Remove markdown code blocks (critical for GPT-4o)
+          let sanitized = content.trim();
+          
+          // Handle various markdown code block formats
+          const markdownPatterns = [
+            /^```json\s*\n?([\s\S]*?)\n?\s*```$/,  // ```json ... ```
+            /^```\s*\n?([\s\S]*?)\n?\s*```$/,      // ``` ... ```
+            /^`{3,}\s*json\s*\n?([\s\S]*?)\n?\s*`{3,}$/,  // Multiple backticks with json
+            /^`{3,}\s*\n?([\s\S]*?)\n?\s*`{3,}$/   // Multiple backticks without json
+          ];
+          
+          for (const pattern of markdownPatterns) {
+            const match = sanitized.match(pattern);
+            if (match && match[1]) {
+              sanitized = match[1].trim();
+              console.log('✅ Removed markdown code block wrapper');
+              break;
+            }
+          }
+          
+          // Try parsing after markdown removal
+          try {
+            return JSON.parse(sanitized);
+          } catch (markdownError) {
+            console.log('⚠️ Still failed after markdown removal, continuing with other sanitization...');
+          }
+
           // Step 1: Fix common Hebrew abbreviations with quotes (both unescaped and partially-escaped)
-          let sanitized = content
+          sanitized = sanitized
             // Fix unescaped Hebrew abbreviations
             .replace(/תב"ע/g, 'תב\\"ע')
             .replace(/ח"כ/g, 'ח\\"כ')
@@ -689,7 +716,7 @@ CRITICAL LANGUAGE REQUIREMENT:
         content: parsedContent,
         type: reportType,
         metadata: {
-          model: options.model || 'gpt-4o-mini',
+          model: options.model || 'gpt-4o',
           processing_time_ms: duration,
           tokens_used: response.usage?.total_tokens || 0,
           generated_at: new Date().toISOString(),
@@ -821,7 +848,7 @@ Respond in JSON format:
 }`;
 
     const response = await this.openai.chat.completions.create({
-      model: options.model || 'gpt-4o-mini',
+      model: options.model || 'gpt-4o',
       messages: [
         {
           role: 'system',
@@ -832,8 +859,8 @@ Respond in JSON format:
           content: summaryPrompt
         }
       ],
-      max_tokens: 1200,
-      temperature: 0.7
+      max_tokens: 1500,
+      temperature: 0.6
     });
 
     const rawContent = response.choices[0].message.content;
@@ -843,44 +870,51 @@ Respond in JSON format:
     } catch (parseError) {
       console.warn('JSON parsing failed, attempting cleanup...');
 
-      // Try to extract JSON from markdown code blocks if present
-      const jsonMatch = rawContent.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
-      if (jsonMatch) {
-        try {
-          return JSON.parse(jsonMatch[1]);
-        } catch (secondError) {
-          console.warn('Markdown JSON extraction failed, continuing with basic cleanup:', secondError.message);
-          // Markdown extraction failed, continue to cleanup
+      // Enhanced markdown code block removal (matching main sanitization logic)
+      let cleaned = rawContent.trim();
+      
+      // Handle various markdown code block formats
+      const markdownPatterns = [
+        /^```json\s*\n?([\s\S]*?)\n?\s*```$/,  // ```json ... ```
+        /^```\s*\n?([\s\S]*?)\n?\s*```$/,      // ``` ... ```
+        /^`{3,}\s*json\s*\n?([\s\S]*?)\n?\s*`{3,}$/,  // Multiple backticks with json
+        /^`{3,}\s*\n?([\s\S]*?)\n?\s*`{3,}$/   // Multiple backticks without json
+      ];
+      
+      for (const pattern of markdownPatterns) {
+        const match = cleaned.match(pattern);
+        if (match && match[1]) {
+          cleaned = match[1].trim();
+          console.log('✅ Removed markdown code block wrapper from chunk summary');
+          break;
         }
       }
 
-      // Try basic cleanup
-      let cleaned = rawContent
-        .replace(/```json\s*/, '')
-        .replace(/```\s*$/, '')
-        .trim();
-
+      // Try parsing after enhanced markdown removal
       try {
         return JSON.parse(cleaned);
-      } catch (thirdError) {
-        console.warn('JSON cleanup failed, using fallback extraction:', thirdError.message);
-
-        // Extract key information using regex as fallback
-        const extractArrayFromText = (text, pattern) => {
-          const matches = text.match(pattern);
-          return matches ? matches.slice(1).filter(Boolean) : [];
-        };
-
-        // Fallback extraction for basic insights (without quotes structure)
-        return {
-          summary: rawContent.replace(/[{}"\[\]]/g, '').substring(0, 200),
-          client_business_insights: extractArrayFromText(rawContent, /"client_business_insights":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
-          advisor_recommendations: extractArrayFromText(rawContent, /"advisor_recommendations":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
-          opportunities_concerns: extractArrayFromText(rawContent, /"opportunities_concerns":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
-          consultation_value: extractArrayFromText(rawContent, /"consultation_value":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
-          key_topics: extractArrayFromText(rawContent, /"key_topics":\s*\[(.*?)\]/s)
-        };
+      } catch (markdownError) {
+        console.warn('Still failed after enhanced markdown removal, continuing with basic cleanup...');
       }
+
+      // Continue with fallback extraction if JSON parsing still fails
+      console.warn('JSON cleanup failed, using fallback extraction');
+
+      // Extract key information using regex as fallback
+      const extractArrayFromText = (text, pattern) => {
+        const matches = text.match(pattern);
+        return matches ? matches.slice(1).filter(Boolean) : [];
+      };
+
+      // Fallback extraction for basic insights (without quotes structure)
+      return {
+        summary: rawContent.replace(/[{}"\[\]]/g, '').substring(0, 200),
+        client_business_insights: extractArrayFromText(rawContent, /"client_business_insights":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+        advisor_recommendations: extractArrayFromText(rawContent, /"advisor_recommendations":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+        opportunities_concerns: extractArrayFromText(rawContent, /"opportunities_concerns":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+        consultation_value: extractArrayFromText(rawContent, /"consultation_value":\s*\[(.*?)\]/s).map(item => ({ insight: item, quotes: [] })),
+        key_topics: extractArrayFromText(rawContent, /"key_topics":\s*\[(.*?)\]/s)
+      };
     }
   }
 
@@ -960,7 +994,7 @@ Respond in JSON format:
     const finalPrompt = this.buildReportPromptFromSummaries(aggregated, reportType, options);
 
     const response = await this.openai.chat.completions.create({
-      model: options.model || 'gpt-4o-mini',
+      model: options.model || 'gpt-4o',
       messages: [
         {
           role: 'system',
@@ -971,8 +1005,8 @@ Respond in JSON format:
           content: finalPrompt
         }
       ],
-      max_tokens: options.max_tokens || 2000,
-      temperature: options.temperature || 0.7
+      max_tokens: options.max_tokens || 3000,
+      temperature: options.temperature || 0.6
     });
 
     const rawContent = response.choices[0].message.content;
@@ -981,8 +1015,36 @@ Respond in JSON format:
     try {
       parsedContent = JSON.parse(rawContent);
     } catch (parseError) {
-      console.warn('Final report JSON parsing failed, using raw content');
-      parsedContent = { content: rawContent, parse_error: true };
+      console.warn('Final report JSON parsing failed, attempting markdown removal...');
+      
+      // Enhanced markdown code block removal (matching main sanitization logic)
+      let cleaned = rawContent.trim();
+      
+      // Handle various markdown code block formats
+      const markdownPatterns = [
+        /^```json\s*\n?([\s\S]*?)\n?\s*```$/,  // ```json ... ```
+        /^```\s*\n?([\s\S]*?)\n?\s*```$/,      // ``` ... ```
+        /^`{3,}\s*json\s*\n?([\s\S]*?)\n?\s*`{3,}$/,  // Multiple backticks with json
+        /^`{3,}\s*\n?([\s\S]*?)\n?\s*`{3,}$/   // Multiple backticks without json
+      ];
+      
+      for (const pattern of markdownPatterns) {
+        const match = cleaned.match(pattern);
+        if (match && match[1]) {
+          cleaned = match[1].trim();
+          console.log('✅ Removed markdown code block wrapper from final report');
+          break;
+        }
+      }
+
+      // Try parsing after markdown removal
+      try {
+        parsedContent = JSON.parse(cleaned);
+        console.log('✅ Successfully parsed final report after markdown removal');
+      } catch (markdownError) {
+        console.warn('Final report still failed after markdown removal, using raw content');
+        parsedContent = { content: rawContent, parse_error: true };
+      }
     }
 
     return {

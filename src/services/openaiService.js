@@ -5,6 +5,7 @@ import axios from 'axios';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { SOURCES_CATEGORIES } from '../data/sourcesData.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -554,11 +555,33 @@ CRITICAL LANGUAGE REQUIREMENT:
     const TOKEN_LIMIT = 5000; // Very low threshold for testing chunked processing (was 20000)
     const CHARS_PER_TOKEN = 4; // Rough estimate
 
+    let result;
     if (transcriptLength > TOKEN_LIMIT * CHARS_PER_TOKEN) {
       console.log(`📊 Large transcript (${transcriptLength} chars), using chunked processing`);
-      return await this.generateReportChunked(transcript, reportType, options);
+      result = await this.generateReportChunked(transcript, reportType, options);
+    } else {
+      result = await this.generateReportDirect(transcript, reportType, options);
     }
-    return await this.generateReportDirect(transcript, reportType, options);
+
+    // Post-process: inject relevant sources for client reports only.
+    // Matches against the generated report content (general_summary + key_insights),
+    // NOT the raw transcript – this is intentional for signal density and performance.
+    if (reportType === 'client' && result && result.content) {
+      try {
+        const matchText = [
+          result.content.general_summary || '',
+          ...(Array.isArray(result.content.key_insights)
+            ? result.content.key_insights.map(i => i.content || '')
+            : [])
+        ].join(' ');
+        result.content.sources = this.selectRelevantSources(matchText);
+        console.log(`📚 Added ${result.content.sources.length} source categories to client report`);
+      } catch (sourcesError) {
+        console.warn('⚠️ Failed to add sources to client report, continuing without:', sourcesError.message);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1375,6 +1398,73 @@ Generate all content in the same language as the transcript, but use English fie
     }
 
     return baseSystem;
+  }
+
+  /**
+   * Select 2-3 relevant source categories based on keyword matching against report content.
+   * Always includes the baseline category (1 link), then adds top 1-2 topically matched
+   * categories (1 link each). Falls back to "support programs" if no keywords match.
+   *
+   * @param {string} matchText - Concatenation of general_summary + key_insights content
+   * @returns {Array} Array of { category: string, links: [{ title, url }] }
+   */
+  selectRelevantSources(matchText) {
+    if (!matchText || typeof matchText !== 'string') return [];
+
+    const text = matchText.toLowerCase();
+
+    const baseline = SOURCES_CATEGORIES.find(cat => cat.baseline);
+
+    // Score each non-baseline category by keyword frequency
+    const scored = SOURCES_CATEGORIES
+      .filter(cat => !cat.baseline)
+      .map(cat => {
+        const allKeywords = [
+          ...(cat.keywords.he || []),
+          ...(cat.keywords.en || []),
+          ...(cat.keywords.ar || [])
+        ];
+        const score = allKeywords.reduce((sum, kw) => {
+          return sum + (text.includes(kw.toLowerCase()) ? 1 : 0);
+        }, 0);
+        return { ...cat, score };
+      })
+      .filter(cat => cat.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    const result = [];
+
+    // Always include 1 link from the baseline category
+    if (baseline && baseline.links.length > 0) {
+      result.push({
+        category: baseline.title,
+        links: [baseline.links[0]]
+      });
+    }
+
+    // Add top 1-2 topically matched categories (1 link each)
+    const topMatches = scored.slice(0, 2);
+    topMatches.forEach(cat => {
+      if (cat.links.length > 0) {
+        result.push({
+          category: cat.title,
+          links: [cat.links[0]]
+        });
+      }
+    });
+
+    // Fallback: if no keyword matches, add support programs as a safe secondary
+    if (topMatches.length === 0) {
+      const fallback = SOURCES_CATEGORIES.find(cat => cat.id === 'support_programs');
+      if (fallback && fallback.links.length > 0) {
+        result.push({
+          category: fallback.title,
+          links: [fallback.links[0]]
+        });
+      }
+    }
+
+    return result;
   }
 
   /**
